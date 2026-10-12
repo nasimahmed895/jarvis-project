@@ -87,34 +87,77 @@ APP_PROTOCOL = APP_VERSION.split()[-1]
 
 _DEFAULT_W, _DEFAULT_H = 980, 700
 _MIN_W,     _MIN_H     = 820, 580
-_LEFT_W  = 148
-_RIGHT_W = 340
+_LEFT_W  = 210
+_RIGHT_W = 360
 
 _OS = platform.system()  # "Windows" | "Darwin" | "Linux"
 
 
 class C:
-    BG        = "#00060a"
-    PANEL     = "#010d14"
-    PANEL2    = "#010f18"
-    BORDER    = "#0d3347"
-    BORDER_B  = "#1a5c7a"
-    BORDER_A  = "#0f4060"
-    PRI       = "#00d4ff"
-    PRI_DIM   = "#007a99"
-    PRI_GHO   = "#001f2e"
-    ACC       = "#ff6b00"
-    ACC2      = "#ffcc00"
-    GREEN     = "#00ff88"
-    GREEN_D   = "#00aa55"
-    RED       = "#ff3355"
-    MUTED_C   = "#ff3366"
-    TEXT      = "#8ffcff"
-    TEXT_DIM  = "#3a8a9a"
-    TEXT_MED  = "#5ab8cc"
-    WHITE     = "#d8f8ff"
-    DARK      = "#000d14"
-    BAR_BG    = "#011520"
+    # Obsidian / Midnight — premium dark spec
+    BG        = "#0b0f19"
+    PANEL     = "#0f1524"
+    PANEL2    = "#141b2d"
+    BORDER    = "#1a2238"
+    BORDER_B  = "#00e5ff"
+    BORDER_A  = "#26304a"
+    PRI       = "#00e5ff"
+    PRI_DIM   = "#2f6bff"
+    PRI_GHO   = "#0a2434"
+    ACC       = "#ff6b6b"
+    ACC2      = "#ffb84e"
+    GREEN     = "#4effb4"
+    GREEN_D   = "#35c98f"
+    RED       = "#ff6b6b"
+    MUTED_C   = "#ff9a9a"
+    TEXT      = "#e6eaf2"
+    TEXT_DIM  = "#7b8299"
+    TEXT_MED  = "#9aa3b7"
+    WHITE     = "#ffffff"
+    DARK      = "#08111c"
+    BAR_BG    = "#141b2d"
+
+
+def _sans_family() -> str:
+    """Pick the best available sans-serif family for the OS."""
+    try:
+        have = set(QFontDatabase.families())
+    except Exception:
+        have = set()
+    # Spec: Inter / Plus Jakarta Sans first, then platform natives.
+    for p in ("Inter", "Plus Jakarta Sans", "SF Pro Display", "SF Pro Text",
+              ".AppleSystemUIFont", "Helvetica Neue",
+              "Segoe UI Variable Display", "Segoe UI",
+              "Roboto", "Ubuntu", "DejaVu Sans", "Arial"):
+        if p in have:
+            return p
+    return "Arial"
+
+
+_HEAD_FAMILY: str | None = None
+def HEAD() -> str:
+    """Display/heading family — Orbitron/Jakarta preferred; falls back to sans."""
+    global _HEAD_FAMILY
+    if _HEAD_FAMILY is not None:
+        return _HEAD_FAMILY
+    try:
+        have = set(QFontDatabase.families())
+    except Exception:
+        have = set()
+    for p in ("Orbitron", "Plus Jakarta Sans", "Inter"):
+        if p in have:
+            _HEAD_FAMILY = p
+            return p
+    _HEAD_FAMILY = SANS()
+    return _HEAD_FAMILY
+
+
+_SANS = None
+def SANS() -> str:
+    global _SANS
+    if _SANS is None:
+        _SANS = _sans_family()
+    return _SANS
 
 
 # Keys tied to the accent colour — status colours (ACC, GREEN, RED…) stay fixed
@@ -428,10 +471,18 @@ class HudCanvas(QWidget):
         # back is instant and costs no reload.
         try:
             from memory.config_manager import get_hud_style
-            self.hud_style = get_hud_style()
+            self.hud_style = get_hud_style() or "reactor"
         except Exception:
-            self.hud_style = "face"
+            self.hud_style = "reactor"
         self._core_phase = 0.0
+        # Dashboard metrics — pushed in by MainWindow after each activity.
+        self._m_msgs = 0
+        self._m_tokens = 0
+        self._m_latency = 0.0
+        self._m_tokens_hist = [0] * 32
+        self._m_msgs_hist = [0] * 32
+        self._m_latency_hist = [0.0] * 32
+        self._m_session_start = time.time()
 
         self._tick       = 0
         self._scale      = 1.0
@@ -467,6 +518,22 @@ class HudCanvas(QWidget):
         self._tmr = QTimer(self)
         self._tmr.timeout.connect(self._step)
         self._tmr.start(16)
+
+    def set_metrics(self, *, msgs=0, tokens=0, latency_ms=0.0,
+                    tokens_hist=None, msgs_hist=None, latency_hist=None,
+                    session_start=None) -> None:
+        self._m_msgs = int(msgs)
+        self._m_tokens = int(tokens)
+        self._m_latency = float(latency_ms)
+        if tokens_hist is not None:
+            self._m_tokens_hist = list(tokens_hist)[-32:]
+        if msgs_hist is not None:
+            self._m_msgs_hist = list(msgs_hist)[-32:]
+        if latency_hist is not None:
+            self._m_latency_hist = list(latency_hist)[-32:]
+        if session_start is not None:
+            self._m_session_start = float(session_start)
+        self.update()
 
     def glance(self, dx: float, dy: float, hold: float = 1.1) -> None:
         """Ask the avatar to look somewhere for a moment (see HoloAvatar.glance)."""
@@ -545,16 +612,27 @@ class HudCanvas(QWidget):
             self._live_amp = lv
 
     def _make_grid(self, W: int, H: int) -> QPixmap:
-        """Pre-render the static grid-dot background into a transparent pixmap so
-        paintEvent can blit it once per frame instead of running a nested
-        drawPoint() loop across the whole widget every 16 ms."""
+        """Glass-dashboard background: deep bg + soft off-center accent glow.
+        Cached per (W, H, accent). No grid — modern dashboards breathe."""
         pm = QPixmap(max(1, W), max(1, H))
-        pm.fill(Qt.GlobalColor.transparent)
+        pm.fill(qcol(C.BG))
         gp = QPainter(pm)
-        gp.setPen(QPen(qcol(C.PRI_GHO), 1))
-        for x in range(0, W, 48):
-            for y in range(0, H, 48):
-                gp.drawPoint(x, y)
+        gp.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        # Off-center accent radial glow — very subtle depth.
+        glow = QRadialGradient(W * 0.30, H * 0.20, max(W, H) * 0.85)
+        gc = QColor(C.PRI); gc.setAlpha(28)
+        glow.setColorAt(0.00, gc)
+        glow.setColorAt(0.55, QColor(C.PRI_GHO))
+        end = QColor(C.BG); end.setAlpha(0)
+        glow.setColorAt(1.00, end)
+        gp.fillRect(0, 0, W, H, QBrush(glow))
+        # Second cooler glow bottom-right for balance.
+        glow2 = QRadialGradient(W * 0.85, H * 0.90, max(W, H) * 0.65)
+        gc2 = QColor("#1a2438"); gc2.setAlpha(60)
+        glow2.setColorAt(0.00, gc2)
+        end2 = QColor(C.BG); end2.setAlpha(0)
+        glow2.setColorAt(1.00, end2)
+        gp.fillRect(0, 0, W, H, QBrush(glow2))
         gp.end()
         return pm
 
@@ -694,251 +772,480 @@ class HudCanvas(QWidget):
             return qcol(C.PRI), qcol(C.GREEN)
         return qcol(C.PRI), qcol(C.PRI_DIM)
 
-    def _paint_core(self, p: QPainter, cx: float, cy: float, r: float,
-                    W: float = 0.0, H: float = 0.0):
-        """Draw the reactor at (cx, cy) with outer radius r, using the whole
-        canvas (W x H) for the marks that frame it."""
-        main, acc = self._core_colours()
-        bg = qcol(C.BG)
-        amp = self._amp_disp
-        t = self._core_phase
-        live = (self.speaking or amp > 0.04) and not self.muted
+    # ── glass tile helpers ────────────────────────────────────────────────
+    def _card_font(self, size: int, bold: bool = False) -> QFont:
+        f = QFont(SANS(), size)
+        f.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
+        if bold:
+            f.setWeight(QFont.Weight.DemiBold)
+        return f
 
-        def blend(col: QColor, a: float) -> QColor:
-            """Pre-mix onto the background instead of asking Qt to composite.
-            The raster engine's opaque path is several times faster than its
-            translucent one, and everything here is a line or an arc."""
-            k = max(0.0, min(1.0, a))
-            return QColor(int(bg.red()   + (col.red()   - bg.red())   * k),
-                          int(bg.green() + (col.green() - bg.green()) * k),
-                          int(bg.blue()  + (col.blue()  - bg.blue())  * k))
-
-        p.setBrush(Qt.BrushStyle.NoBrush)
-
-        # 1. The atmosphere. One radial gradient doing what a stack of discs did
-        #    badly: a wide, soft body of light that gives the thing presence
-        #    before any detail is read. This single element decides whether the
-        #    HUD looks vast or looks small, so it is drawn first and drawn big.
-        # Concentrated rather than spread: a gradient reaching the outer rim
-        # washes the whole disc a flat dim blue and reads as fog. Ending it at
-        # two thirds leaves it a body of light with somewhere to fall off to,
-        # which is what makes it look lit rather than tinted.
-        lift = 1.0 + 0.55 * amp + (0.18 if self.speaking else 0.0)
+    def _paint_card(self, p: QPainter, rect: QRectF, title: str = "",
+                     accent: QColor | None = None) -> QRectF:
+        """Frosted-glass card: rounded rect, sheen gradient, border with
+        gradient top-highlight (glass gleam), title in caps. Returns
+        the inner content rect below the title."""
+        r = 16.0
+        # Soft outer shadow — draw two very faint shadow rects offset.
+        for k, a in ((3, 8), (6, 4)):
+            sh = QColor(0, 0, 0, a)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QBrush(sh))
+            p.drawRoundedRect(QRectF(rect.left(), rect.top() + k,
+                                       rect.width(), rect.height()),
+                                r, r)
+        # Fill — subtle top-to-bottom sheen so the card reads as glass.
+        g = QLinearGradient(rect.left(), rect.top(),
+                             rect.left(), rect.bottom())
+        g.setColorAt(0.00, QColor(255, 255, 255, 20))
+        g.setColorAt(0.55, QColor(255, 255, 255, 10))
+        g.setColorAt(1.00, QColor(255, 255, 255, 5))
         p.setPen(Qt.PenStyle.NoPen)
-        for gr, a0, a1 in ((r * 0.70, 0.30, 0.0), (r * 0.34, 0.34, 0.0)):
-            g = QRadialGradient(cx, cy, gr)
-            g.setColorAt(0.00, blend(main, min(0.95, a0 * lift)))
-            g.setColorAt(0.45, blend(main, min(0.95, a0 * lift * 0.52)))
-            g.setColorAt(0.78, blend(main, min(0.95, a0 * lift * 0.18)))
-            g.setColorAt(1.00, blend(main, a1))
-            p.setBrush(QBrush(g))
-            p.drawEllipse(QRectF(cx - gr, cy - gr, gr * 2, gr * 2))
+        p.setBrush(QBrush(g))
+        p.drawRoundedRect(rect, r, r)
+        # Border — gradient hairline (brighter top, dimmer bottom) reads
+        # as ambient light hitting a glass edge.
+        bg = QLinearGradient(rect.left(), rect.top(),
+                              rect.left(), rect.bottom())
+        bg.setColorAt(0.00, QColor(255, 255, 255, 65))
+        bg.setColorAt(0.50, QColor(255, 255, 255, 26))
+        bg.setColorAt(1.00, QColor(255, 255, 255, 16))
+        pen = QPen(QBrush(bg), 1)
+        p.setPen(pen)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawRoundedRect(rect, r, r)
+        # Inner top-edge gleam — 1-px bright line just inside the top border.
+        gleam = QPen(QColor(255, 255, 255, 60), 1)
+        p.setPen(gleam)
+        # Approximate the rounded top with a small horizontal segment.
+        p.drawLine(QLineF(rect.left() + r * 0.85,
+                           rect.top() + 1.4,
+                           rect.right() - r * 0.85,
+                           rect.top() + 1.4))
+        # Optional accent dot next to title.
+        pad = 18.0
+        title_h = 18.0
+        if title:
+            if accent is not None:
+                # Pulsing dot ring around the accent for extra life.
+                p.setPen(Qt.PenStyle.NoPen)
+                halo = QColor(accent); halo.setAlpha(90)
+                p.setBrush(QBrush(halo))
+                p.drawEllipse(QRectF(rect.left() + pad - 3,
+                                      rect.top() + pad + 0,
+                                      12, 12))
+                p.setBrush(QBrush(accent))
+                p.drawEllipse(QRectF(rect.left() + pad,
+                                      rect.top() + pad + 3, 6, 6))
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                tx = rect.left() + pad + 14
+            else:
+                tx = rect.left() + pad
+            p.setPen(QPen(qcol(C.TEXT_DIM), 1))
+            f = self._card_font(9, bold=True)
+            f.setCapitalization(QFont.Capitalization.AllUppercase)
+            f.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 1.6)
+            p.setFont(f)
+            p.drawText(QPointF(tx, rect.top() + pad + 9), title)
+        inner = QRectF(rect.left() + pad,
+                        rect.top() + pad + title_h + 4,
+                        rect.width() - pad * 2,
+                        rect.height() - pad * 2 - title_h - 4)
+        return inner
+
+    def _paint_sparkline(self, p: QPainter, rect: QRectF,
+                          values, color: QColor, filled: bool = True):
+        if not values or rect.width() < 4 or rect.height() < 4:
+            return
+        vs = list(values)
+        lo, hi = min(vs), max(vs)
+        if hi - lo < 1e-6:
+            hi = lo + 1.0
+        n = len(vs)
+        pts = []
+        for i, v in enumerate(vs):
+            x = rect.left() + (i / max(1, n - 1)) * rect.width()
+            y = rect.bottom() - 3 - (v - lo) / (hi - lo) * (rect.height() - 6)
+            pts.append(QPointF(x, y))
+        # Smoothed path — Catmull-Rom-ish curve via cubic beziers so
+        # sparkline reads as flowing rather than saw-tooth.
+        line_path = QPainterPath()
+        line_path.moveTo(pts[0])
+        for i in range(1, len(pts)):
+            prev = pts[i - 1]
+            cur = pts[i]
+            mid_x = (prev.x() + cur.x()) / 2
+            line_path.cubicTo(mid_x, prev.y(), mid_x, cur.y(),
+                                cur.x(), cur.y())
+        if filled and len(pts) > 1:
+            fill_path = QPainterPath(line_path)
+            fill_path.lineTo(rect.right(), rect.bottom())
+            fill_path.lineTo(rect.left(), rect.bottom())
+            fill_path.closeSubpath()
+            fg = QLinearGradient(rect.left(), rect.top(),
+                                    rect.left(), rect.bottom())
+            fc_top = QColor(color); fc_top.setAlpha(90)
+            fc_bot = QColor(color); fc_bot.setAlpha(0)
+            fg.setColorAt(0.00, fc_top)
+            fg.setColorAt(1.00, fc_bot)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QBrush(fg))
+            p.drawPath(fill_path)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        line = QColor(color); line.setAlpha(240)
+        pen = QPen(line, 2.0)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        p.setPen(pen)
+        p.drawPath(line_path)
+        # Trailing dot with halo
+        end = pts[-1]
+        halo = QColor(color); halo.setAlpha(80)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(halo))
+        p.drawEllipse(end, 6.0, 6.0)
+        p.setBrush(QBrush(line))
+        p.drawEllipse(end, 3.0, 3.0)
         p.setBrush(Qt.BrushStyle.NoBrush)
 
-        # 2. Frame marks at the corners of the whole canvas, not of the circle.
-        #    They are what set the scale: the eye reads the reactor as filling
-        #    the room rather than sitting in the middle of it.
-        if W > 40 and H > 40:
-            m, arm = min(W, H) * 0.035, min(W, H) * 0.055
-            p.setPen(QPen(blend(main, 0.45), 1.4))
-            for sx, sy in ((1, 1), (-1, 1), (1, -1), (-1, -1)):
-                x = cx + sx * (W / 2 - m)
-                y = cy + sy * (H / 2 - m)
-                p.drawLine(QLineF(x, y, x - sx * arm, y))
-                p.drawLine(QLineF(x, y, x, y - sy * arm))
-
-        # 3. Crosshair across the full canvas, broken around the core so it
-        #    frames the reactor rather than crossing it.
-        p.setPen(QPen(blend(main, 0.16), 1))
-        gap = r * 0.62
-        if W > 40:
-            p.drawLine(QLineF(cx - W / 2, cy, cx - gap, cy))
-            p.drawLine(QLineF(cx + gap, cy, cx + W / 2, cy))
-        if H > 40:
-            p.drawLine(QLineF(cx, cy - H / 2, cx, cy - gap))
-            p.drawLine(QLineF(cx, cy + gap, cx, cy + H / 2))
-
-        # 4. Two thin outer circles. Sparse on purpose — a dense ring reads as a
-        #    grey band at this size, and restraint is what made the original
-        #    look expensive.
-        for rr, a in ((1.00, 0.34), (0.93, 0.16)):
-            rad = r * rr
-            p.setPen(QPen(blend(main, a), 1))
-            p.drawEllipse(QRectF(cx - rad, cy - rad, rad * 2, rad * 2))
-
-        # 5. Long, sparse graduations: 24 majors reaching well in from the rim,
-        #    with shorter minors between them.
-        major, minor = [], []
-        for i in range(72):
-            a = math.radians(i * 5.0)
-            ca, sa = math.cos(a), math.sin(a)
-            if i % 3 == 0:
-                major.append(QLineF(cx + ca * r * 0.885, cy + sa * r * 0.885,
-                                    cx + ca * r * 0.985, cy + sa * r * 0.985))
-            else:
-                minor.append(QLineF(cx + ca * r * 0.945, cy + sa * r * 0.945,
-                                    cx + ca * r * 0.985, cy + sa * r * 0.985))
-        p.setPen(QPen(blend(main, 0.42), 1.3))
-        p.drawLines(major)
-        p.setPen(QPen(blend(main, 0.18), 1))
-        p.drawLines(minor)
-
-        # 6. Sweeping arcs. Long spans, not dashes — the original's grandeur
-        #    came from a few big strokes. Speed is the state: idle drifts,
-        #    thinking hurries, speaking runs.
-        rate = 1.0 + (1.9 if self.state in ("THINKING", "PROCESSING") else 0.0) \
-                   + (1.2 if self.speaking else 0.0)
-        for k, (rr, span, count, dirn, col, a, wid) in enumerate((
-                (0.955, 118, 2, +1, acc,  0.75, 2.0),
-                (0.845, 82,  3, -1, main, 0.38, 1.3),
-                (0.760, 150, 1, +1, acc,  0.45, 1.6),
-                (0.660, 64,  4, -1, main, 0.26, 1.1),
-                (0.545, 128, 2, +1, main, 0.30, 1.2))):
-            rad = r * rr
-            p.setPen(QPen(blend(col, a), wid))
-            box = QRectF(cx - rad, cy - rad, rad * 2, rad * 2)
-            base = (t * rate * (9 + k * 6) * dirn) % 360.0
-            for sgm in range(count):
-                p.drawArc(box, int((base + sgm * (360.0 / count)) * 16),
-                          int(span * 16))
-
-        # 7. The voice, as a ring of graduations that grow with it. Kept out at
-        #    a wide radius so it never crowds the middle.
-        n = 60
-        ring = r * 0.415
-        spikes = []
-        for i in range(n):
-            a = math.radians(i * (360.0 / n))
-            ca, sa = math.cos(a), math.sin(a)
-            wob = 0.5 + 0.5 * math.sin(t * 2.3 + i * 0.42)
-            idle = 0.018 + 0.012 * math.sin(t * 1.2 + i * 0.7)
-            h = r * (idle + (amp * 0.20 * wob if live else 0.0))
-            spikes.append(QLineF(cx + ca * ring, cy + sa * ring,
-                                 cx + ca * (ring + h), cy + sa * (ring + h)))
-        p.setPen(QPen(blend(acc if live else main, 0.25 + 0.5 * amp), 1.6))
-        p.drawLines(spikes)
-
-        # 8. The inner ring the name sits in.
-        inner = r * 0.355
-        p.setPen(QPen(blend(acc, 0.30 + 0.45 * amp), 1.5))
-        p.drawEllipse(QRectF(cx - inner, cy - inner, inner * 2, inner * 2))
-
-        # 9. The name, sized from the string rather than from the radius alone:
-        #    "J.A.R.V.I.S" and a name someone renamed to "MAX" are very
-        #    different widths, and a fixed fraction of r spills one of them past
-        #    the ring it is supposed to sit inside.
-        name = self._assistant_name or ""
-        if name:
-            space = max(1.0, r * 0.018)
-            fsz = max(8, int(min(r * 0.105,
-                                 (inner * 1.75) / max(1, len(name)) * 1.6 - space)))
-            f = QFont("Courier New", fsz, QFont.Weight.Bold)
-            f.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, space)
-            p.setFont(f)
-            p.setPen(QPen(blend(qcol(C.WHITE), 0.6 + 0.4 * min(1.0, amp * 2)), 1))
-            p.drawText(QRectF(cx - r, cy - fsz, r * 2, fsz * 2),
-                       Qt.AlignmentFlag.AlignCenter, name)
-
-    def paintEvent(self, _):
-        p = QPainter(self)
-        if not p.isActive():      # device not ready (e.g. 0-size during layout) — skip cleanly
+    def _paint_gauge(self, p: QPainter, rect: QRectF, pct: float,
+                     color: QColor):
+        cx = rect.center().x()
+        cy = rect.bottom() - 4
+        r = min(rect.width() / 2 - 8, rect.height() - 8)
+        if r < 10:
             return
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        p.fillRect(self.rect(), qcol(C.BG))
+        # Track
+        p.setPen(QPen(QColor(255, 255, 255, 34), 6,
+                       cap=Qt.PenCapStyle.RoundCap))
+        p.drawArc(QRectF(cx - r, cy - r, r * 2, r * 2),
+                   180 * 16, -180 * 16)
+        # Fill
+        ang = -180.0 * max(0.0, min(1.0, pct / 100.0))
+        p.setPen(QPen(color, 6, cap=Qt.PenCapStyle.RoundCap))
+        p.drawArc(QRectF(cx - r, cy - r, r * 2, r * 2),
+                   180 * 16, int(ang * 16))
+        # Value text
+        p.setFont(self._card_font(20, bold=True))
+        p.setPen(QPen(qcol(C.TEXT), 1))
+        p.drawText(QRectF(cx - r, cy - r * 0.55, r * 2, r * 0.6),
+                    Qt.AlignmentFlag.AlignCenter,
+                    f"{int(pct)}%")
 
-        W, H = self.width(), self.height()
-        cx, cy = W / 2, H / 2
-        fw = min(W, H)
+    def _paint_line_chart(self, p: QPainter, rect: QRectF, values,
+                           color: QColor):
+        if not values or len(values) < 2:
+            return
+        vs = list(values)
+        lo, hi = min(vs), max(vs)
+        if hi - lo < 1e-6:
+            hi = lo + 1.0
+        n = len(vs)
+        pts = []
+        for i, v in enumerate(vs):
+            x = rect.left() + (i / max(1, n - 1)) * rect.width()
+            y = rect.bottom() - (v - lo) / (hi - lo) * rect.height()
+            pts.append(QPointF(x, y))
+        # Baseline
+        p.setPen(QPen(QColor(255, 255, 255, 20), 1))
+        p.drawLine(QLineF(rect.left(), rect.bottom(),
+                           rect.right(), rect.bottom()))
+        # Line
+        p.setPen(QPen(color, 1.8))
+        for i in range(1, len(pts)):
+            p.drawLine(pts[i - 1], pts[i])
+        # Recent-point dot
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(color))
+        p.drawEllipse(pts[-1], 2.5, 2.5)
+        p.setBrush(Qt.BrushStyle.NoBrush)
 
-        # grid dots — blitted from a cached layer; rebuilt only when the size
-        # or the theme's ghost colour changes (so live re-theming still works).
-        _gkey = (W, H, C.PRI_GHO)
-        if self._grid_cache is None or self._grid_key != _gkey:
-            self._grid_cache = self._make_grid(W, H)
-            self._grid_key   = _gkey
-        p.drawPixmap(0, 0, self._grid_cache)
-
-        # ── holographic head ────────────────────────────────────────────────
-        # Sized to the band between the top of the canvas and the status line,
-        # capped by width, so it fills the HUD at any window size — including
-        # fullscreen — without ever colliding with the status text below.
-        _sy_status = cy + fw * 0.40
-        if self._avatar is not None and self.hud_style == "face":
-            _band_t = 12.0
-            _band_h = max(60.0, _sy_status - 12.0 - _band_t)
-            _r_head = min(fw * 0.355, _band_h / (self._avatar.SPAN + 0.08))
-            _head_cy = _band_t + (_band_h - self._avatar.SPAN * _r_head) / 2.0 + _r_head
-
-            if self.muted:
-                _main = _acc = qcol(C.MUTED_C)
-            else:
-                _main = qcol(C.PRI)
-                if self.speaking:
-                    _acc = qcol(C.ACC)
-                elif self.state in ("THINKING", "PROCESSING"):
-                    _acc = qcol(C.ACC2)
-                elif self.state == "LISTENING":
-                    _acc = qcol(C.GREEN)
-                else:
-                    _acc = qcol(C.PRI)
-            self._avatar.paint(p, cx, _head_cy, _r_head, _main, _acc, qcol(C.BG))
-
-        # reactor core — the other centrepiece, and the fallback if the head
-        # could not be built. There is no third path: the old face.png branch
-        # was unreachable (no such file ships) and the bare orb it fell through
-        # to is what this replaces.
-        else:
-            _band_t = 12.0
-            _band_h = max(60.0, _sy_status - 12.0 - _band_t)
-            _r = min(W * 0.46, _band_h / 2.0)
-            self._paint_core(p, cx, _band_t + _band_h / 2.0, _r, W, _band_h)
-
-        # status text
-        sy = _sy_status
+    def _state_display(self):
+        """(label, color, subtitle) for the big status tile."""
         if self.muted:
-            txt, col = "⊘  MUTED",     qcol(C.MUTED_C)
-        elif self.speaking:
-            txt, col = "●  SPEAKING",  qcol(C.ACC)
-        elif self.state == "THINKING":
-            sym = "◈" if self._blink else "◇"
-            txt, col = f"{sym}  THINKING",   qcol(C.ACC2)
-        elif self.state == "PROCESSING":
-            sym = "▷" if self._blink else "▶"
-            txt, col = f"{sym}  PROCESSING", qcol(C.ACC2)
-        elif self.state == "LISTENING":
-            sym = "●" if self._blink else "○"
-            txt, col = f"{sym}  LISTENING",  qcol(C.GREEN)
+            return "Muted", qcol(C.MUTED_C), "microphone off"
+        if self.speaking:
+            return "Speaking", qcol(C.PRI), "delivering response"
+        if self.state == "THINKING":
+            return "Thinking", qcol(C.ACC2), "analysing request"
+        if self.state == "PROCESSING":
+            return "Working", qcol(C.ACC2), "executing task"
+        if self.state == "LISTENING":
+            return "Listening", qcol(C.GREEN), "ready for input"
+        if self.state == "INITIALISING":
+            return "Starting", qcol(C.PRI_DIM), "loading models"
+        return self.state.title(), qcol(C.PRI), ""
+
+    def _paint_status_tile(self, p: QPainter, rect: QRectF):
+        label, col, sub = self._state_display()
+        inner = self._paint_card(p, rect, title="Status", accent=col)
+        # Big label
+        p.setFont(self._card_font(30, bold=True))
+        p.setPen(QPen(qcol(C.TEXT), 1))
+        p.drawText(QRectF(inner.left(), inner.top() - 2,
+                           inner.width(), 40),
+                    Qt.AlignmentFlag.AlignLeft
+                    | Qt.AlignmentFlag.AlignVCenter, label)
+        # Subtitle
+        p.setFont(self._card_font(12))
+        p.setPen(QPen(qcol(C.TEXT_MED), 1))
+        p.drawText(QRectF(inner.left(), inner.top() + 42,
+                           inner.width(), 18),
+                    Qt.AlignmentFlag.AlignLeft, sub)
+        # Since HH:MM (from session start).
+        since = time.strftime("%H:%M",
+                                time.localtime(getattr(self,
+                                    "_m_session_start", time.time())))
+        p.setFont(self._card_font(9, bold=True))
+        p.setPen(QPen(qcol(C.TEXT_DIM), 1))
+        p.drawText(QRectF(inner.left(), inner.top() + 64,
+                           inner.width(), 14),
+                    Qt.AlignmentFlag.AlignLeft,
+                    f"session since {since}")
+        # Assistant name + protocol tag at bottom.
+        name = (self._assistant_name or "JARVIS")
+        p.setFont(self._card_font(10, bold=True))
+        p.setPen(QPen(qcol(C.TEXT_DIM), 1))
+        p.drawText(QRectF(inner.left(), inner.bottom() - 16,
+                           inner.width(), 16),
+                    Qt.AlignmentFlag.AlignLeft,
+                    f"{name} · {APP_PROTOCOL}")
+        # ── Pulsing halo indicator, concentric rings + core ─────────────
+        r0 = min(inner.height() / 2.0, 46.0)
+        rx = inner.right() - r0 - 8
+        ry = inner.top() + inner.height() / 2
+        pulse = 0.5 + 0.5 * math.sin(self._core_phase * 2.6)
+        # Outer ring (breathing)
+        p.setPen(Qt.PenStyle.NoPen)
+        for k, (rr, a) in enumerate(((1.00, 22 + 34 * pulse),
+                                        (0.82, 44 + 60 * pulse),
+                                        (0.60, 90 + 100 * pulse))):
+            hc = QColor(col); hc.setAlpha(int(a))
+            p.setBrush(QBrush(hc))
+            p.drawEllipse(QPointF(rx, ry), r0 * rr, r0 * rr)
+        # Bright core
+        core_c = QColor(col); core_c.setAlpha(245)
+        p.setBrush(QBrush(core_c))
+        p.drawEllipse(QPointF(rx, ry), r0 * 0.30, r0 * 0.30)
+        # White highlight spot on the core (glass sheen).
+        hi = QColor(255, 255, 255, 180)
+        p.setBrush(QBrush(hi))
+        p.drawEllipse(QPointF(rx - r0 * 0.09, ry - r0 * 0.10),
+                       r0 * 0.10, r0 * 0.10)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+
+    def _paint_metric_tile(self, p: QPainter, rect: QRectF, *,
+                            title: str, value: str, unit: str,
+                            color: QColor, history, chart: str = "spark"):
+        inner = self._paint_card(p, rect, title=title, accent=color)
+        from PyQt6.QtGui import QFontMetrics
+        # Value (large) + unit (inline muted).
+        vf = self._card_font(30, bold=True)
+        p.setFont(vf)
+        p.setPen(QPen(qcol(C.TEXT), 1))
+        p.drawText(QRectF(inner.left(), inner.top() - 4,
+                           inner.width(), 42),
+                    Qt.AlignmentFlag.AlignLeft
+                    | Qt.AlignmentFlag.AlignVCenter, value)
+        fm_val = QFontMetrics(vf)
+        vw = fm_val.horizontalAdvance(value)
+        if unit:
+            p.setFont(self._card_font(11))
+            p.setPen(QPen(qcol(C.TEXT_MED), 1))
+            p.drawText(QPointF(inner.left() + vw + 6,
+                                inner.top() + 22), unit)
+        # Trend indicator top-right (except gauge — no history).
+        if chart != "gauge":
+            trend_txt, trend_col = self._trend(history)
+            if trend_txt:
+                tf = self._card_font(9, bold=True)
+                p.setFont(tf)
+                p.setPen(QPen(trend_col, 1))
+                fm_t = QFontMetrics(tf)
+                tw = fm_t.horizontalAdvance(trend_txt) + 14
+                pill_rect = QRectF(inner.right() - tw,
+                                     inner.top() - 4,
+                                     tw, 22)
+                pill_fill = QColor(trend_col); pill_fill.setAlpha(30)
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QBrush(pill_fill))
+                p.drawRoundedRect(pill_rect, 11, 11)
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.setPen(QPen(trend_col, 1))
+                p.setFont(tf)
+                p.drawText(pill_rect, Qt.AlignmentFlag.AlignCenter,
+                            trend_txt)
+        # Chart in the bottom half.
+        chart_top = inner.top() + 44
+        chart_rect = QRectF(inner.left(), chart_top,
+                             inner.width(),
+                             max(20.0, inner.bottom() - chart_top))
+        if chart == "line":
+            self._paint_line_chart(p, chart_rect, history, color)
+        elif chart == "gauge":
+            self._paint_gauge(p, chart_rect, float(value.rstrip("% ")
+                                                     or "0"), color)
         else:
-            sym = "●" if self._blink else "○"
-            txt, col = f"{sym}  {self.state}", qcol(C.PRI)
+            self._paint_sparkline(p, chart_rect, history, color, filled=True)
 
-        p.setPen(QPen(col, 1))
-        p.setFont(QFont("Courier New", 11, QFont.Weight.Bold))
-        p.drawText(QRectF(0, sy, W, 26), Qt.AlignmentFlag.AlignCenter, txt)
-
-        # waveform — reacts to the real audio level (mic while listening,
-        # JARVIS's own voice while speaking). Falls back to a gentle idle
-        # ripple when there's no sound. _amp_disp is the smoothed 0–1 level.
-        wy = sy + 30
-        N, bw = 36, 8
-        wx0 = (W - N * bw) / 2
+    def _paint_waveform_tile(self, p: QPainter, rect: QRectF):
+        col = qcol(C.PRI)
+        if self.muted:
+            col = qcol(C.MUTED_C)
+        elif self.speaking:
+            col = qcol(C.PRI)
+        elif self.state == "LISTENING":
+            col = qcol(C.GREEN)
+        inner = self._paint_card(p, rect, title="Audio", accent=col)
+        N = max(28, int(inner.width() // 10))
+        bw = max(4.0, inner.width() / (N * 1.35))
+        gap = bw * 0.35
+        total = N * (bw + gap) - gap
+        x0 = inner.left() + (inner.width() - total) / 2
         amp = self._amp_disp
         mid = (N - 1) / 2.0
         for i in range(N):
             if self.muted:
-                hgt, cl = 2, qcol(C.MUTED_C)
+                hgt = 3.0
             else:
-                env     = (1.0 - abs(i - mid) / mid) ** 0.7      # center-weighted hump
-                shimmer = 0.55 + 0.45 * math.sin(self._tick * 0.18 + i * 0.7)
-                idle    = 3.0 + 2.0 * math.sin(self._tick * 0.09 + i * 0.6)
-                hgt     = int(max(2, min(24, idle + amp * 22.0 * env * shimmer)))
-                if amp > 0.05:
-                    cl = qcol(C.PRI) if hgt > 12 else qcol(C.PRI_DIM)
-                else:
-                    cl = qcol(C.BORDER_B)
-            p.fillRect(QRectF(wx0 + i * bw, wy + 20 - hgt, bw - 1, hgt), cl)
+                env = (1.0 - abs(i - mid) / mid) ** 0.7
+                shim = 0.55 + 0.45 * math.sin(self._tick * 0.18 + i * 0.7)
+                idle = 3.0 + 2.0 * math.sin(self._tick * 0.09 + i * 0.6)
+                hgt = max(3.0, min(inner.height() - 8,
+                                     idle + amp * 42.0 * env * shim))
+            r = QRectF(x0 + i * (bw + gap),
+                        inner.bottom() - hgt, bw, hgt)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QBrush(col))
+            p.drawRoundedRect(r, bw / 2, bw / 2)
+        p.setBrush(Qt.BrushStyle.NoBrush)
 
-        p.end()   # end deterministically so the backing store never flushes an active painter
+    def _fmt_int(self, n: int) -> str:
+        """Compact int formatting — 12,345 → 12.3k, 4,300,000 → 4.3M."""
+        n = int(n)
+        if n < 1000:
+            return f"{n}"
+        if n < 1_000_000:
+            v = n / 1000.0
+            return f"{v:.1f}k" if v < 100 else f"{v:.0f}k"
+        v = n / 1_000_000.0
+        return f"{v:.1f}M" if v < 100 else f"{v:.0f}M"
+
+    def _trend(self, hist) -> tuple[str, QColor]:
+        """Compute a compact trend indicator (▲/▼ + %) from a rolling series."""
+        vs = [v for v in (hist or []) if isinstance(v, (int, float))]
+        if len(vs) < 4:
+            return "", qcol(C.TEXT_DIM)
+        recent = sum(vs[-4:]) / 4.0
+        prior  = sum(vs[-8:-4]) / 4.0 if len(vs) >= 8 else vs[0]
+        if prior < 1e-6:
+            if recent > 0:
+                return "▲ new", qcol(C.GREEN)
+            return "flat", qcol(C.TEXT_DIM)
+        delta = (recent - prior) / prior * 100.0
+        if delta >= 1.5:
+            return f"▲ {delta:.0f}%", qcol(C.GREEN)
+        if delta <= -1.5:
+            return f"▼ {abs(delta):.0f}%", qcol(C.ACC)
+        return "flat", qcol(C.TEXT_DIM)
+
+    def _fmt_dur(self, seconds: float) -> str:
+        s = int(max(0, seconds))
+        h, rem = divmod(s, 3600)
+        m, s = divmod(rem, 60)
+        return f"{h:d}:{m:02d}:{s:02d}"
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        if not p.isActive():
+            return
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        W, H = self.width(), self.height()
+        # Background (cached radial glow).
+        _gkey = (W, H, C.PRI, C.BG)
+        if self._grid_cache is None or self._grid_key != _gkey:
+            self._grid_cache = self._make_grid(W, H)
+            self._grid_key = _gkey
+        p.drawPixmap(0, 0, self._grid_cache)
+
+        # Layout: outer padding + gutters. Grid rows/cols computed per size.
+        pad = 18.0
+        gap = 14.0
+        cont = QRectF(pad, pad, max(0.0, W - pad * 2),
+                       max(0.0, H - pad * 2))
+        if cont.width() < 240 or cont.height() < 240:
+            # Too small to lay out cards — just show status card.
+            self._paint_status_tile(p, cont)
+            p.end()
+            return
+
+        # Row 1: STATUS card, full width, ~28% of height.
+        row1_h = min(180.0, cont.height() * 0.30)
+        row1 = QRectF(cont.left(), cont.top(),
+                       cont.width(), row1_h)
+        self._paint_status_tile(p, row1)
+
+        # Rows 2 & 3: 3-column grid.
+        remaining_h = cont.height() - row1_h - gap
+        row_h = (remaining_h - gap) / 2
+        col_w = (cont.width() - gap * 2) / 3
+
+        def rc(row: int, col: int, span: int = 1) -> QRectF:
+            x = cont.left() + col * (col_w + gap)
+            y = cont.top() + row1_h + gap + row * (row_h + gap)
+            w = col_w * span + gap * (span - 1)
+            return QRectF(x, y, w, row_h)
+
+        # Row 2 tiles.
+        self._paint_metric_tile(p, rc(0, 0),
+            title="Messages",
+            value=self._fmt_int(self._m_msgs or 0),
+            unit="total",
+            color=qcol(C.PRI),
+            history=self._m_msgs_hist,
+            chart="spark")
+        self._paint_metric_tile(p, rc(0, 1),
+            title="Tokens",
+            value=self._fmt_int(self._m_tokens or 0),
+            unit="today",
+            color=qcol(C.GREEN),
+            history=self._m_tokens_hist,
+            chart="spark")
+        lat = self._m_latency or 0.0
+        self._paint_metric_tile(p, rc(0, 2),
+            title="Response Time",
+            value=f"{lat:.0f}",
+            unit="ms",
+            color=qcol(C.ACC2),
+            history=self._m_latency_hist,
+            chart="line")
+
+        # Row 3 tiles.
+        mem_pct = 0.0
+        try:
+            mem_pct = float(_metrics.mem or 0.0)
+        except Exception:
+            pass
+        self._paint_metric_tile(p, rc(1, 0),
+            title="Memory",
+            value=f"{mem_pct:.0f}%",
+            unit="",
+            color=qcol(C.PRI),
+            history=[],
+            chart="gauge")
+        # Waveform card (audio).
+        self._paint_waveform_tile(p, rc(1, 1))
+        # Session card.
+        sess = self._m_session_start or time.time()
+        self._paint_metric_tile(p, rc(1, 2),
+            title="Session",
+            value=self._fmt_dur(time.time() - sess),
+            unit="uptime",
+            color=qcol(C.GREEN),
+            history=[],
+            chart="spark")
+
+        p.end()
 
 class MetricBar(QWidget):
 
@@ -966,24 +1273,25 @@ class MetricBar(QWidget):
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         W, H = self.width(), self.height()
 
-        p.setBrush(QBrush(qcol(C.PANEL2)))
-        p.setPen(QPen(qcol(C.BORDER_A), 1))
-        p.drawRoundedRect(QRectF(1, 1, W - 2, H - 2), 4, 4)
+        # Glass row
+        p.setBrush(QBrush(QColor(255, 255, 255, 10)))
+        p.setPen(QPen(QColor(255, 255, 255, 26), 1))
+        p.drawRoundedRect(QRectF(1, 1, W - 2, H - 2), 10, 10)
 
         bar_h   = 4
-        bar_y   = H - bar_h - 5
-        bar_w   = W - 12
-        bar_x   = 6
+        bar_y   = H - bar_h - 7
+        bar_w   = W - 16
+        bar_x   = 8
         fill_w  = int(bar_w * self._value / 100)
 
-        p.setBrush(QBrush(qcol(C.BAR_BG)))
+        p.setBrush(QBrush(QColor(255, 255, 255, 18)))
         p.setPen(Qt.PenStyle.NoPen)
         p.drawRoundedRect(QRectF(bar_x, bar_y, bar_w, bar_h), 2, 2)
 
         if self._value > 85:
-            bar_col = qcol(C.RED)
-        elif self._value > 65:
             bar_col = qcol(C.ACC)
+        elif self._value > 65:
+            bar_col = qcol(C.ACC2)
         else:
             bar_col = qcol(self._color)
 
@@ -991,13 +1299,20 @@ class MetricBar(QWidget):
             p.setBrush(QBrush(bar_col))
             p.drawRoundedRect(QRectF(bar_x, bar_y, fill_w, bar_h), 2, 2)
 
-        p.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
+        lf = QFont(SANS(), 9, QFont.Weight.DemiBold)
+        lf.setCapitalization(QFont.Capitalization.AllUppercase)
+        lf.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 1.0)
+        p.setFont(lf)
         p.setPen(QPen(qcol(C.TEXT_DIM), 1))
-        p.drawText(QRectF(8, 5, 50, 14), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, self._label)
+        p.drawText(QRectF(10, 4, 60, 18),
+                    Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                    self._label)
 
-        p.setFont(QFont("Courier New", 9, QFont.Weight.Bold))
+        p.setFont(QFont(SANS(), 11, QFont.Weight.DemiBold))
         p.setPen(QPen(bar_col if self._text != "--" else qcol(C.TEXT_DIM), 1))
-        p.drawText(QRectF(0, 4, W - 6, 16), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, self._text)
+        p.drawText(QRectF(0, 4, W - 10, 18),
+                    Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                    self._text)
 
         p.end()
 
@@ -1011,25 +1326,31 @@ class LogWidget(QTextEdit):
         # without bound — keeps memory flat and every insert cheap. Oldest
         # lines drop off the top automatically.
         self.document().setMaximumBlockCount(600)
-        self.setFont(QFont("Courier New", 9))
+        self.setFont(QFont(SANS(), 10))
+        self.setPlaceholderText(
+            "No activity yet.\nType a prompt below or use one of the quick actions to start."
+        )
         self.setStyleSheet(f"""
             QTextEdit {{
-                background: {C.PANEL};
+                background: rgba(255,255,255,4);
                 color: {C.TEXT};
-                border: 1px solid {C.BORDER};
-                border-radius: 4px;
-                padding: 6px;
-                selection-background-color: {C.PRI_GHO};
+                border: 1px solid rgba(255,255,255,14);
+                border-radius: 14px;
+                padding: 12px;
+                selection-background-color: {C.PRI_DIM};
             }}
             QScrollBar:vertical {{
-                background: {C.BG};
+                background: transparent;
                 width: 8px;
                 border: none;
             }}
             QScrollBar::handle:vertical {{
-                background: {C.BORDER_B};
+                background: rgba(255,255,255,30);
                 border-radius: 4px;
                 min-height: 20px;
+            }}
+            QScrollBar::handle:vertical:hover {{
+                background: rgba(255,255,255,60);
             }}
         """)
         self._queue: list[str] = []
@@ -2989,6 +3310,17 @@ class MainWindow(QMainWindow):
         self.on_voice_change   = None   # callable: () -> None — rebuild session with new voice
         self.on_audio_device_change = None  # callable: () -> None — reopen audio streams
         self._confirm_overlay  = None   # live ConfirmBanner, if one is on screen
+
+        # Dashboard metrics — populated from user activity, kept as short
+        # rolling histories so the sparklines have something to draw.
+        self._msg_count      = 0
+        self._token_count    = 0
+        self._tokens_hist    = [0] * 32
+        self._msgs_hist      = [0] * 32
+        self._latency_hist   = [0.0] * 32
+        self._last_lat_ms    = 0.0
+        self._last_user_t    = None
+        self._session_start  = time.time()
         self.get_plugins       = None   # callable: () -> list[dict], set by JarvisLive
         self.get_plugin_settings = None # callable: () -> list[dict] settings schemas, set by JarvisLive
         self.on_wake_toggle    = None   # callable: (enable: bool) -> str, set by JarvisLive
@@ -3207,6 +3539,12 @@ class MainWindow(QMainWindow):
         # Quick-access drawer (floating overlay, built after central widget layout is done)
         self._quick_drawer = self._build_quick_drawer()
         self._ctrl_drawer = self._build_controls_drawer()
+
+        # Highlight default nav pill + rail button now that both exist.
+        try:
+            self._select_nav("chat")
+        except Exception:
+            pass
         self._warm_wake_state()
         self._update_autostart_btn(self._check_autostart())
         from memory.config_manager import get_brief_enabled as _gbe
@@ -3919,44 +4257,74 @@ class MainWindow(QMainWindow):
             elapsed = time.time() - boot_t
             h = int(elapsed // 3600)
             m = int((elapsed % 3600) // 60)
-            self._uptime_lbl.setText(f"UP  {h:02d}:{m:02d}")
+            self._uptime_lbl.setText(f"Uptime {h}h {m:02d}m")
         except Exception:
-            self._uptime_lbl.setText("UP  --:--")
+            self._uptime_lbl.setText("Uptime — · —")
 
         try:
             proc_count = len(psutil.pids())
-            self._proc_lbl.setText(f"PROC  {proc_count}")
+            self._proc_lbl.setText(f"Processes {proc_count}")
         except Exception:
-            self._proc_lbl.setText("PROC  --")
+            self._proc_lbl.setText("Processes —")
 
 
     def _build_header(self) -> QWidget:
         w = QWidget()
-        w.setFixedHeight(54)
-        w.setStyleSheet(f"background: {C.DARK}; border-bottom: 1px solid {C.BORDER_B};")
+        w.setFixedHeight(60)
+        w.setStyleSheet(
+            f"background: rgba(255,255,255,4); "
+            f"border-bottom: 1px solid rgba(255,255,255,18);"
+        )
         lay = QHBoxLayout(w)
-        lay.setContentsMargins(16, 0, 16, 0)
+        lay.setContentsMargins(20, 0, 20, 0)
+        lay.setSpacing(10)
 
-        def _badge(txt, color=C.TEXT_MED):
-            l = QLabel(txt)
-            l.setFont(QFont("Courier New", 8))
-            l.setStyleSheet(f"color: {color}; background: transparent;")
-            return l
+        # ── Brand mark: violet gradient blob + wordmark ───────────────────
+        brand = QWidget()
+        brand.setFixedHeight(36)
+        brand_lay = QHBoxLayout(brand)
+        brand_lay.setContentsMargins(0, 0, 0, 0)
+        brand_lay.setSpacing(10)
 
-        lay.addWidget(_badge(APP_VERSION, C.PRI_DIM))
-        lay.addSpacing(8)
+        logo = QLabel()
+        logo.setFixedSize(32, 32)
+        logo.setStyleSheet(
+            f"background: qlineargradient(x1:0, y1:0, x2:1, y2:1, "
+            f"stop:0 {C.PRI}, stop:1 {C.PRI_DIM}); "
+            f"border-radius: 10px; color: white;"
+        )
+        logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        logo.setFont(QFont(SANS(), 15, QFont.Weight.DemiBold))
+        _init = (self._assistant_name[:1] or "J").upper()
+        logo.setText(_init)
+        brand_lay.addWidget(logo)
+
+        wm = QVBoxLayout(); wm.setSpacing(0)
+        wm_name = QLabel(APP_VERSION)
+        wm_name.setFont(QFont(SANS(), 10, QFont.Weight.DemiBold))
+        wm_name.setStyleSheet(f"color: {C.TEXT}; background: transparent;")
+        wm.addWidget(wm_name)
+        wm_tag = QLabel("workspace")
+        wm_tag.setFont(QFont(SANS(), 8))
+        wm_tag.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+        wm.addWidget(wm_tag)
+        brand_lay.addLayout(wm)
+        lay.addWidget(brand)
+
+        lay.addSpacing(18)
+        # ── Icon buttons: settings + controls ─────────────────────────────
         self._drawer_btn = QPushButton("⚙")
-        self._drawer_btn.setFixedSize(26, 26)
-        self._drawer_btn.setFont(QFont("Courier New", 11))
+        self._drawer_btn.setFixedSize(34, 34)
+        self._drawer_btn.setFont(QFont(SANS(), 14))
         self._drawer_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._drawer_btn.setToolTip("Settings & Controls")
         self._drawer_btn.setStyleSheet(f"""
             QPushButton {{
-                background: transparent; color: {C.TEXT_DIM};
-                border: 1px solid {C.BORDER}; border-radius: 4px;
+                background: rgba(255,255,255,8); color: {C.TEXT_MED};
+                border: 1px solid rgba(255,255,255,18); border-radius: 10px;
             }}
-            QPushButton:hover {{ color: {C.PRI}; border-color: {C.PRI_DIM}; }}
-            QPushButton:checked {{ color: {C.PRI}; border-color: {C.PRI}; background: {C.PRI_GHO}; }}
+            QPushButton:hover {{ color: {C.TEXT}; background: rgba(255,255,255,16); }}
+            QPushButton:checked {{ color: {C.WHITE}; background: {C.PRI}; border-color: {C.PRI}; }}
         """)
         self._drawer_btn.setCheckable(True)
         self._drawer_btn.setToolTip("Setup — things you set once")
@@ -3970,48 +4338,168 @@ class MainWindow(QMainWindow):
         # day. Separating them by that — setup behind ⚙, everyday behind 🎛 —
         # is what makes each list short enough to read at a glance.
         self._ctrl_btn = QPushButton("🎛")
-        self._ctrl_btn.setFixedSize(26, 26)
-        self._ctrl_btn.setFont(QFont("Courier New", 11))
+        self._ctrl_btn.setFixedSize(34, 34)
+        self._ctrl_btn.setFont(QFont(SANS(), 14))
         self._ctrl_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._ctrl_btn.setToolTip("Controls — the everyday switches")
         self._ctrl_btn.setStyleSheet(self._drawer_btn.styleSheet())
         self._ctrl_btn.setCheckable(True)
         self._ctrl_btn.clicked.connect(self._toggle_controls)
-        lay.addSpacing(4)
         lay.addWidget(self._ctrl_btn)
         lay.addStretch()
 
-        mid = QVBoxLayout(); mid.setSpacing(1)
-        _disp = self._assistant_name.upper()
-        self._title_lbl = QLabel(_disp)
-        self._title_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._title_lbl.setFont(QFont("Courier New", 17, QFont.Weight.Bold))
-        self._title_lbl.setStyleSheet(f"color: {C.PRI}; background: transparent;")
-        mid.addWidget(self._title_lbl)
-        _sub_text = ("A Friendly Assistant"
-                     if _disp in ("JARVIS", "J.A.R.V.I.S")
-                     else "Personal AI Assistant")
-        self._sub_lbl = QLabel(_sub_text)
-        self._sub_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._sub_lbl.setFont(QFont("Courier New", 7))
-        self._sub_lbl.setStyleSheet(f"color: {C.PRI_DIM}; background: transparent;")
-        mid.addWidget(self._sub_lbl)
-        lay.addLayout(mid)
+        # ── Center: nav pills — each pill triggers a real action ──────────
+        pill_wrap = QWidget()
+        pill_wrap.setStyleSheet(
+            f"background: rgba(255,255,255,6); "
+            f"border: 1px solid rgba(255,255,255,14); border-radius: 12px;"
+        )
+        pill_lay = QHBoxLayout(pill_wrap)
+        pill_lay.setContentsMargins(4, 4, 4, 4)
+        pill_lay.setSpacing(2)
+        self._nav_pills: dict[str, QPushButton] = {}
+        for label, key in (("Chat", "chat"), ("History", "history"),
+                            ("Plugins", "plugins"), ("Settings", "settings")):
+            b = QPushButton(label)
+            b.setFixedHeight(28)
+            b.setFont(QFont(SANS(), 9, QFont.Weight.DemiBold))
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.setProperty("navKey", key)
+            b.clicked.connect(lambda _, k=key: self._select_nav(k))
+            pill_lay.addWidget(b)
+            self._nav_pills[key] = b
+        lay.addWidget(pill_wrap)
         lay.addStretch()
+        # Default active view.
+        self._active_nav = "chat"
 
-        right_col = QVBoxLayout(); right_col.setSpacing(2)
+        # ── Right cluster: status chip + clock + avatar ───────────────────
+        self._status_chip = QLabel()
+        self._status_chip.setFont(QFont(SANS(), 9, QFont.Weight.DemiBold))
+        self._status_chip.setTextFormat(Qt.TextFormat.RichText)
+        self._status_chip.setStyleSheet(
+            f"background: rgba(48,209,88,26); "
+            f"border: 1px solid rgba(48,209,88,80); "
+            f"border-radius: 12px; padding: 4px 12px; color: {C.GREEN};"
+        )
+        self._status_chip.setText(
+            f"<span style='color:{C.GREEN}'>●</span> "
+            f"<span style='color:{C.TEXT}'>Online</span>"
+        )
+        lay.addWidget(self._status_chip)
+
+        right_col = QVBoxLayout(); right_col.setSpacing(1)
         self._clock_lbl = QLabel("00:00:00")
-        self._clock_lbl.setFont(QFont("Courier New", 14, QFont.Weight.Bold))
-        self._clock_lbl.setStyleSheet(f"color: {C.PRI}; background: transparent;")
+        _clock_font = QFont(SANS(), 14, QFont.Weight.DemiBold)
+        self._clock_lbl.setFont(_clock_font)
+        self._clock_lbl.setStyleSheet(f"color: {C.TEXT}; background: transparent;")
         self._clock_lbl.setAlignment(Qt.AlignmentFlag.AlignRight)
         right_col.addWidget(self._clock_lbl)
         self._date_lbl = QLabel("")
-        self._date_lbl.setFont(QFont("Courier New", 7))
+        self._date_lbl.setFont(QFont(SANS(), 8))
         self._date_lbl.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
         self._date_lbl.setAlignment(Qt.AlignmentFlag.AlignRight)
         right_col.addWidget(self._date_lbl)
         lay.addLayout(right_col)
+
+        # Circular user avatar — clickable, opens settings drawer.
+        avatar = QPushButton("U")
+        avatar.setFixedSize(36, 36)
+        avatar.setCursor(Qt.CursorShape.PointingHandCursor)
+        avatar.setStyleSheet(
+            f"QPushButton {{ background: qlineargradient(x1:0, y1:0, x2:1, y2:1, "
+            f"stop:0 #ff6b9c, stop:1 #ffb350); "
+            f"border-radius: 18px; color: white; "
+            f"border: none; font-family: {SANS()}; "
+            f"font-weight: 600; font-size: 12pt; }}"
+            f"QPushButton:hover {{ border: 1px solid rgba(255,255,255,40); }}"
+        )
+        avatar.setToolTip("Account · open settings")
+        avatar.clicked.connect(lambda: self._drawer_btn.click())
+        lay.addSpacing(4)
+        lay.addWidget(avatar)
         return w
+
+    def _select_nav(self, key: str):
+        """Nav pills + icon-rail dispatch. Each key runs a real action."""
+        self._active_nav = key
+        # Repaint pill highlight
+        for k, btn in getattr(self, "_nav_pills", {}).items():
+            if k == key:
+                btn.setStyleSheet(f"""
+                    QPushButton {{
+                        background: rgba(255,255,255,14); color: {C.TEXT};
+                        border: none; border-radius: 8px; padding: 0 14px;
+                    }}
+                """)
+            else:
+                btn.setStyleSheet(f"""
+                    QPushButton {{
+                        background: transparent; color: {C.TEXT_DIM};
+                        border: none; border-radius: 8px; padding: 0 14px;
+                    }}
+                    QPushButton:hover {{ color: {C.TEXT}; background: rgba(255,255,255,6); }}
+                """)
+        # Repaint icon-rail highlight
+        for k, btn in getattr(self, "_rail_btns", {}).items():
+            active = (k == key)
+            if active:
+                btn.setStyleSheet(f"""
+                    QPushButton {{
+                        background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                            stop:0 {C.PRI}, stop:1 {C.PRI_DIM});
+                        color: white; border: none; border-radius: 12px;
+                    }}
+                """)
+            else:
+                btn.setStyleSheet(f"""
+                    QPushButton {{
+                        background: transparent; color: {C.TEXT_MED};
+                        border: none; border-radius: 12px;
+                    }}
+                    QPushButton:hover {{
+                        color: {C.TEXT}; background: rgba(255,255,255,10);
+                    }}
+                """)
+        # Dispatch
+        if key == "chat":
+            try:
+                self._close_setup()
+                self._close_controls()
+                self._input.setFocus()
+            except Exception:
+                pass
+        elif key == "history":
+            try:
+                self._close_setup()
+                self._close_controls()
+                if hasattr(self._log, "verticalScrollBar"):
+                    sb = self._log.verticalScrollBar()
+                    sb.setValue(sb.maximum())
+                self._log.setFocus()
+            except Exception:
+                pass
+        elif key == "stats":
+            try:
+                self._close_setup()
+                self._close_controls()
+                self.hud.setFocus()
+            except Exception:
+                pass
+        elif key == "plugins":
+            try:
+                if hasattr(self, "_ctrl_btn"):
+                    self._ctrl_btn.setChecked(True)
+                    self._toggle_controls(True)
+            except Exception:
+                pass
+        elif key == "settings":
+            try:
+                if hasattr(self, "_drawer_btn"):
+                    self._drawer_btn.setChecked(True)
+                    self._toggle_drawer(True)
+            except Exception:
+                pass
 
     def _tick_clock(self):
         self._clock_lbl.setText(time.strftime("%H:%M:%S"))
@@ -4020,142 +4508,330 @@ class MainWindow(QMainWindow):
     def _build_left_panel(self) -> QWidget:
         w = QWidget()
         w.setFixedWidth(_LEFT_W)
-        w.setStyleSheet(f"background: {C.DARK}; border-right: 1px solid {C.BORDER};")
-        lay = QVBoxLayout(w)
-        lay.setContentsMargins(8, 10, 8, 10)
-        lay.setSpacing(6)
+        w.setStyleSheet(
+            f"background: rgba(255,255,255,4); "
+            f"border-right: 1px solid rgba(255,255,255,12);"
+        )
+        outer = QHBoxLayout(w)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
 
-        hdr = QLabel("◈ SYS MONITOR")
-        hdr.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
-        hdr.setStyleSheet(f"color: {C.PRI}; background: transparent; "
-                          f"border-bottom: 1px solid {C.BORDER}; padding-bottom: 4px;")
-        lay.addWidget(hdr)
-        lay.addSpacing(2)
+        # ── Vertical icon rail (48 px) ────────────────────────────────────
+        rail = QWidget()
+        rail.setFixedWidth(52)
+        rail.setStyleSheet(
+            f"background: rgba(0,0,0,60); "
+            f"border-right: 1px solid rgba(255,255,255,10);"
+        )
+        rail_lay = QVBoxLayout(rail)
+        rail_lay.setContentsMargins(6, 14, 6, 14)
+        rail_lay.setSpacing(6)
+
+        def _rail_btn(glyph: str, key: str, tip: str) -> QPushButton:
+            b = QPushButton(glyph)
+            b.setFixedSize(40, 40)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.setFont(QFont(SANS(), 15))
+            b.setToolTip(tip)
+            b.setStyleSheet(f"""
+                QPushButton {{
+                    background: transparent; color: {C.TEXT_MED};
+                    border: none; border-radius: 12px;
+                }}
+                QPushButton:hover {{
+                    color: {C.TEXT}; background: rgba(255,255,255,10);
+                }}
+            """)
+            b.clicked.connect(lambda _, k=key: self._select_nav(k))
+            return b
+
+        self._rail_btns: dict[str, QPushButton] = {}
+        # Geometric glyphs read cleaner than emoji at small sizes.
+        for glyph, key, tip in (
+            ("◐", "chat",     "Chat"),
+            ("▤", "stats",    "Stats"),
+            ("◇", "plugins",  "Plugins & controls"),
+            ("⟳", "history",  "History"),
+            ("✧", "settings", "Settings"),
+        ):
+            btn = _rail_btn(glyph, key, tip)
+            rail_lay.addWidget(btn)
+            self._rail_btns[key] = btn
+        rail_lay.addStretch()
+
+        # Profile chip at bottom of rail — clickable, opens settings.
+        prof = QPushButton("U")
+        prof.setFixedSize(40, 40)
+        prof.setCursor(Qt.CursorShape.PointingHandCursor)
+        prof.setToolTip("Account · open settings")
+        prof.setStyleSheet(
+            f"QPushButton {{ background: qlineargradient(x1:0, y1:0, x2:1, y2:1, "
+            f"stop:0 #ff6b9c, stop:1 #ffb350); color: white; border-radius: 12px; "
+            f"border: none; font-family: {SANS()}; font-weight: 600; font-size: 13pt; }}"
+            f"QPushButton:hover {{ border: 1px solid rgba(255,255,255,40); }}"
+        )
+        prof.clicked.connect(lambda: self._select_nav("settings"))
+        rail_lay.addWidget(prof)
+        outer.addWidget(rail)
+
+        # ── Right side: content column ────────────────────────────────────
+        content = QWidget()
+        lay = QVBoxLayout(content)
+        lay.setContentsMargins(14, 16, 14, 16)
+        lay.setSpacing(12)
+
+        # SYS card — one glass container with all metric bars inside
+        sys_card = QWidget()
+        sys_card.setStyleSheet(
+            f"background: rgba(255,255,255,6); "
+            f"border: 1px solid rgba(255,255,255,14); border-radius: 14px;"
+        )
+        sys_lay = QVBoxLayout(sys_card)
+        sys_lay.setContentsMargins(12, 10, 12, 10)
+        sys_lay.setSpacing(6)
+
+        sh = QLabel("System")
+        _hf = QFont(SANS(), 9, QFont.Weight.DemiBold)
+        _hf.setCapitalization(QFont.Capitalization.AllUppercase)
+        _hf.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 1.4)
+        sh.setFont(_hf)
+        sh.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent; border: none;")
+        sys_lay.addWidget(sh)
 
         self._bar_cpu = MetricBar("CPU", C.PRI)
-        self._bar_mem = MetricBar("MEM", C.ACC2)
-        self._bar_net = MetricBar("NET", C.GREEN)
-        self._bar_gpu = MetricBar("GPU", C.ACC)
-        self._bar_tmp = MetricBar("TMP", "#ff6688")
-
+        self._bar_mem = MetricBar("MEM", C.GREEN)
+        self._bar_net = MetricBar("NET", C.ACC2)
+        self._bar_gpu = MetricBar("GPU", C.PRI)
+        self._bar_tmp = MetricBar("TMP", C.ACC)
         for bar in [self._bar_cpu, self._bar_mem, self._bar_net,
                     self._bar_gpu, self._bar_tmp]:
-            lay.addWidget(bar)
+            bar.setStyleSheet("background: transparent; border: none;")
+            sys_lay.addWidget(bar)
+        lay.addWidget(sys_card)
 
-        lay.addSpacing(4)
-
-        info_panel = QWidget()
-        info_panel.setStyleSheet(
-            f"background: {C.PANEL2}; border: 1px solid {C.BORDER}; border-radius: 4px;"
+        # Uptime card — big number + subtitle
+        up_card = QWidget()
+        up_card.setStyleSheet(
+            f"background: rgba(255,255,255,6); "
+            f"border: 1px solid rgba(255,255,255,14); border-radius: 14px;"
         )
-        ip_lay = QVBoxLayout(info_panel)
-        ip_lay.setContentsMargins(6, 5, 6, 5)
-        ip_lay.setSpacing(3)
+        up_lay = QVBoxLayout(up_card)
+        up_lay.setContentsMargins(12, 10, 12, 10)
+        up_lay.setSpacing(2)
 
-        self._uptime_lbl = QLabel("UP  --:--")
-        self._uptime_lbl.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
-        self._uptime_lbl.setStyleSheet(f"color: {C.GREEN}; background: transparent; border: none;")
-        ip_lay.addWidget(self._uptime_lbl)
+        u_hdr = QLabel("Machine")
+        u_hdr.setFont(_hf)
+        u_hdr.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent; border: none;")
+        up_lay.addWidget(u_hdr)
 
-        self._proc_lbl = QLabel("PROC  --")
-        self._proc_lbl.setFont(QFont("Courier New", 8))
+        self._uptime_lbl = QLabel("Uptime — · —")
+        self._uptime_lbl.setFont(QFont(SANS(), 12, QFont.Weight.DemiBold))
+        self._uptime_lbl.setStyleSheet(f"color: {C.TEXT}; background: transparent; border: none;")
+        up_lay.addWidget(self._uptime_lbl)
+
+        self._proc_lbl = QLabel("Processes —")
+        self._proc_lbl.setFont(QFont(SANS(), 9))
         self._proc_lbl.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent; border: none;")
-        ip_lay.addWidget(self._proc_lbl)
+        up_lay.addWidget(self._proc_lbl)
 
-        os_name = {"Windows": "WIN", "Darwin": "macOS", "Linux": "LINUX"}.get(_OS, _OS.upper())
-        os_lbl = QLabel(f"OS  {os_name}")
-        os_lbl.setFont(QFont("Courier New", 8))
-        os_lbl.setStyleSheet(f"color: {C.ACC2}; background: transparent; border: none;")
-        ip_lay.addWidget(os_lbl)
-
-        lay.addWidget(info_panel)
-        lay.addSpacing(4)
+        os_name = {"Windows": "Windows", "Darwin": "macOS", "Linux": "Linux"}.get(_OS, _OS)
+        os_lbl = QLabel(f"{os_name} · {APP_PROTOCOL}")
+        os_lbl.setFont(QFont(SANS(), 9))
+        os_lbl.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent; border: none;")
+        up_lay.addWidget(os_lbl)
+        lay.addWidget(up_card)
 
         lay.addStretch()
 
-        for txt, col in [
-            ("AI CORE\nACTIVE",  C.GREEN),
-            ("SEC\nCLEARED",     C.PRI),
-            ("PROTOCOL\n" + APP_PROTOCOL,   C.TEXT_DIM),
-        ]:
-            lbl = QLabel(txt)
-            lbl.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
-            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            lbl.setStyleSheet(
-                f"color: {col}; background: {C.PANEL2};"
-                f"border: 1px solid {C.BORDER_A}; border-radius: 3px; padding: 4px;"
-            )
-            lay.addWidget(lbl)
+        # User profile chip at bottom — clickable → open settings drawer.
+        prof_chip = QPushButton()
+        prof_chip.setCursor(Qt.CursorShape.PointingHandCursor)
+        prof_chip.setToolTip("Account · open settings")
+        prof_chip.setFixedHeight(46)
+        prof_chip.setStyleSheet(f"""
+            QPushButton {{
+                background: rgba(255,255,255,6);
+                border: 1px solid rgba(255,255,255,14);
+                border-radius: 12px; text-align: left; padding: 0;
+            }}
+            QPushButton:hover {{ background: rgba(255,255,255,12); }}
+        """)
+        pc_lay = QHBoxLayout(prof_chip)
+        pc_lay.setContentsMargins(8, 6, 10, 6)
+        pc_lay.setSpacing(8)
 
+        av = QLabel("U")
+        av.setFixedSize(30, 30)
+        av.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        av.setFont(QFont(SANS(), 11, QFont.Weight.DemiBold))
+        av.setStyleSheet(
+            f"background: qlineargradient(x1:0, y1:0, x2:1, y2:1, "
+            f"stop:0 #ff6b9c, stop:1 #ffb350); color: white; border-radius: 10px;"
+        )
+        pc_lay.addWidget(av)
+
+        pc_col = QVBoxLayout(); pc_col.setSpacing(0)
+        _user_label = (_read_full_config().get("assistant_name") or "User").split()[0]
+        pc_name = QLabel(_user_label)
+        pc_name.setFont(QFont(SANS(), 10, QFont.Weight.DemiBold))
+        pc_name.setStyleSheet(f"color: {C.TEXT}; background: transparent; border: none;")
+        pc_col.addWidget(pc_name)
+        os_name = {"Windows": "Windows", "Darwin": "macOS", "Linux": "Linux"}.get(_OS, _OS)
+        pc_tag = QLabel(f"{os_name} · {APP_PROTOCOL}")
+        pc_tag.setFont(QFont(SANS(), 8))
+        pc_tag.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent; border: none;")
+        pc_col.addWidget(pc_tag)
+        pc_lay.addLayout(pc_col)
+        pc_lay.addStretch()
+        prof_chip.clicked.connect(lambda: self._select_nav("settings"))
+        lay.addWidget(prof_chip)
+
+        outer.addWidget(content, stretch=1)
         return w
     def _build_right_panel(self) -> QWidget:
         w = QWidget()
         w.setFixedWidth(_RIGHT_W)
-        w.setStyleSheet(f"background: {C.DARK}; border-left: 1px solid {C.BORDER};")
+        w.setStyleSheet(
+            f"background: rgba(255,255,255,4); "
+            f"border-left: 1px solid rgba(255,255,255,12);"
+        )
         lay = QVBoxLayout(w)
-        lay.setContentsMargins(8, 8, 8, 8)
-        lay.setSpacing(6)
+        lay.setContentsMargins(14, 16, 14, 16)
+        lay.setSpacing(12)
 
         def _sec(txt):
-            l = QLabel(f"▸ {txt}")
-            l.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
-            l.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent;")
+            l = QLabel(txt)
+            f = QFont(SANS(), 9, QFont.Weight.DemiBold)
+            f.setCapitalization(QFont.Capitalization.AllUppercase)
+            f.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 1.4)
+            l.setFont(f)
+            l.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
             return l
 
-        lay.addWidget(_sec("ACTIVITY LOG"))
+        # ── PROMPT — top-anchored, big, prominent ─────────────────────────
+        prompt_card = QWidget()
+        prompt_card.setStyleSheet(
+            f"background: rgba(255,255,255,6); "
+            f"border: 1px solid rgba(255,255,255,18); border-radius: 14px;"
+        )
+        pc_lay = QVBoxLayout(prompt_card)
+        pc_lay.setContentsMargins(14, 12, 14, 12)
+        pc_lay.setSpacing(8)
+
+        pc_lay.addWidget(_sec("Prompt"))
+        pc_lay.addLayout(self._build_input_row())
+
+        # Quick-action chip row under the input
+        chip_row = QHBoxLayout(); chip_row.setSpacing(6)
+        for label in ("Ask", "Summarise", "Translate", "Code"):
+            b = QPushButton(label)
+            b.setFixedHeight(26)
+            b.setFont(QFont(SANS(), 9))
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.setStyleSheet(f"""
+                QPushButton {{
+                    background: rgba(255,255,255,8); color: {C.TEXT_MED};
+                    border: 1px solid rgba(255,255,255,14);
+                    border-radius: 13px; padding: 0 12px;
+                }}
+                QPushButton:hover {{ color: {C.TEXT}; background: rgba(255,255,255,14); }}
+            """)
+            b.clicked.connect(lambda _, t=label: self._quick_action(t))
+            chip_row.addWidget(b)
+        chip_row.addStretch()
+        pc_lay.addLayout(chip_row)
+        lay.addWidget(prompt_card)
+
+        # ── Activity feed ─────────────────────────────────────────────────
+        act_hdr = QHBoxLayout()
+        act_hdr.addWidget(_sec("Activity"))
+        act_hdr.addStretch()
+        clear_btn = QPushButton("Clear")
+        clear_btn.setFixedHeight(20)
+        clear_btn.setFont(QFont(SANS(), 8))
+        clear_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        clear_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent; color: {C.TEXT_DIM};
+                border: none; padding: 0 6px;
+            }}
+            QPushButton:hover {{ color: {C.TEXT}; }}
+        """)
+        clear_btn.clicked.connect(lambda: (self._log.clear()
+                                             if hasattr(self._log, "clear")
+                                             else None))
+        act_hdr.addWidget(clear_btn)
+        lay.addLayout(act_hdr)
+
         self._log = LogWidget()
+        try:
+            self._log.setStyleSheet(
+                f"background: rgba(255,255,255,4); "
+                f"color: {C.TEXT}; "
+                f"border: 1px solid rgba(255,255,255,12); border-radius: 14px; "
+                f"padding: 8px;"
+            )
+        except Exception:
+            pass
         lay.addWidget(self._log, stretch=1)
 
-        sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine)
-        sep.setStyleSheet(f"color: {C.BORDER}; margin: 2px 0;")
-        lay.addWidget(sep)
-
-        lay.addWidget(_sec("FILE UPLOAD"))
+        # ── File drop, compact ────────────────────────────────────────────
         self._drop_zone = FileDropZone()
         self._drop_zone.file_selected.connect(self._on_file_selected)
         lay.addWidget(self._drop_zone)
 
-        self._file_hint = QLabel("No file loaded — drop or click above to upload")
-        self._file_hint.setFont(QFont("Courier New", 7))
-        self._file_hint.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent;")
+        self._file_hint = QLabel("Drop or click above")
+        self._file_hint.setFont(QFont(SANS(), 8))
+        self._file_hint.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
         self._file_hint.setWordWrap(True)
+        self._file_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
         lay.addWidget(self._file_hint)
 
-        sep2 = QFrame(); sep2.setFrameShape(QFrame.Shape.HLine)
-        sep2.setStyleSheet(f"color: {C.BORDER}; margin: 2px 0;")
-        lay.addWidget(sep2)
+        # ── Bottom action row: interrupt + mute side-by-side ──────────────
+        act_row = QHBoxLayout(); act_row.setSpacing(8)
 
-        lay.addWidget(_sec("COMMAND INPUT"))
-        lay.addLayout(self._build_input_row())
-
-        self._interrupt_btn = QPushButton("✋  INTERRUPT  [ESC]")
-        self._interrupt_btn.setFixedHeight(34)
-        self._interrupt_btn.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
+        self._interrupt_btn = QPushButton("Stop")
+        self._interrupt_btn.setFixedHeight(40)
+        self._interrupt_btn.setFont(QFont(SANS(), 10, QFont.Weight.DemiBold))
         self._interrupt_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._interrupt_btn.setStyleSheet(f"""
             QPushButton {{
-                background: #140008; color: {C.MUTED_C};
-                border: 1px solid {C.MUTED_C}; border-radius: 3px;
+                background: rgba(255,69,58,32); color: {C.ACC};
+                border: 1px solid rgba(255,69,58,90); border-radius: 12px;
             }}
             QPushButton:hover {{
-                background: #200010; border: 1px solid #ff6688;
+                background: rgba(255,69,58,55); color: {C.WHITE};
+                border: 1px solid {C.ACC};
             }}
-            QPushButton:pressed {{
-                background: #300018;
-            }}
+            QPushButton:pressed {{ background: rgba(255,69,58,80); }}
         """)
         self._interrupt_btn.clicked.connect(self._do_interrupt)
-        lay.addWidget(self._interrupt_btn)
+        act_row.addWidget(self._interrupt_btn, stretch=1)
 
-        self._mute_btn = QPushButton("🎙  MICROPHONE ACTIVE")
-        self._mute_btn.setFixedHeight(30)
-        self._mute_btn.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
+        self._mute_btn = QPushButton("🎙  Live")
+        self._mute_btn.setFixedHeight(40)
+        self._mute_btn.setFont(QFont(SANS(), 10, QFont.Weight.DemiBold))
         self._mute_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._mute_btn.clicked.connect(self._toggle_mute)
         self._style_mute_btn()
-        lay.addWidget(self._mute_btn)
+        act_row.addWidget(self._mute_btn, stretch=1)
+        lay.addLayout(act_row)
 
         return w
+
+    def _quick_action(self, label: str):
+        """Chip clicks pre-fill the prompt with a starter phrase."""
+        starters = {
+            "Ask":       "Tell me about ",
+            "Summarise": "Summarise this: ",
+            "Translate": "Translate to English: ",
+            "Code":      "Write code that ",
+        }
+        try:
+            self._input.setText(starters.get(label, ""))
+            self._input.setFocus()
+        except Exception:
+            pass
 
     def _build_quick_drawer(self) -> QWidget:
         """Floating overlay panel shown when the ⚙ header button is toggled."""
@@ -4388,31 +5064,33 @@ class MainWindow(QMainWindow):
             self._place_drawer(self._ctrl_drawer, left)
 
     def _build_input_row(self) -> QHBoxLayout:
-        row = QHBoxLayout(); row.setSpacing(5)
+        row = QHBoxLayout(); row.setSpacing(8)
         self._input = QLineEdit()
-        self._input.setPlaceholderText("Type a command or question…")
-        self._input.setFont(QFont("Courier New", 9))
-        self._input.setFixedHeight(30)
+        self._input.setPlaceholderText("Ask anything…")
+        self._input.setFont(QFont(SANS(), 11))
+        self._input.setFixedHeight(38)
         self._input.setStyleSheet(f"""
             QLineEdit {{
-                background: #000d14; color: {C.WHITE};
-                border: 1px solid {C.BORDER}; border-radius: 3px; padding: 3px 7px;
+                background: rgba(255,255,255,6); color: {C.TEXT};
+                border: 1px solid rgba(255,255,255,16);
+                border-radius: 10px; padding: 4px 12px;
             }}
-            QLineEdit:focus {{ border: 1px solid {C.PRI}; }}
+            QLineEdit:focus {{ border: 1px solid {C.PRI}; background: rgba(255,255,255,10); }}
         """)
         self._input.returnPressed.connect(self._send)
         row.addWidget(self._input)
 
-        send = QPushButton("▸")
-        send.setFixedSize(30, 30)
-        send.setFont(QFont("Courier New", 11, QFont.Weight.Bold))
+        send = QPushButton("→")
+        send.setFixedSize(38, 38)
+        send.setFont(QFont(SANS(), 15, QFont.Weight.DemiBold))
         send.setCursor(Qt.CursorShape.PointingHandCursor)
         send.setStyleSheet(f"""
             QPushButton {{
-                background: {C.PANEL}; color: {C.PRI};
-                border: 1px solid {C.PRI_DIM}; border-radius: 3px;
+                background: {C.PRI}; color: {C.WHITE};
+                border: 1px solid {C.PRI}; border-radius: 10px;
             }}
-            QPushButton:hover {{ background: {C.PRI_GHO}; border: 1px solid {C.PRI}; }}
+            QPushButton:hover {{ background: {C.PRI_DIM}; border-color: {C.PRI_DIM}; }}
+            QPushButton:pressed {{ background: {C.PRI_DIM}; }}
         """)
         send.clicked.connect(self._send)
         row.addWidget(send)
@@ -5522,21 +6200,22 @@ class MainWindow(QMainWindow):
 
     def _style_mute_btn(self):
         if self._muted:
-            self._mute_btn.setText("🔇  MICROPHONE MUTED")
+            self._mute_btn.setText("🔇  Muted")
             self._mute_btn.setStyleSheet(f"""
                 QPushButton {{
-                    background: #140006; color: {C.MUTED_C};
-                    border: 1px solid {C.MUTED_C}; border-radius: 3px;
+                    background: rgba(255,122,117,28); color: {C.MUTED_C};
+                    border: 1px solid rgba(255,122,117,90); border-radius: 12px;
                 }}
+                QPushButton:hover {{ background: rgba(255,122,117,55); color: {C.WHITE}; }}
             """)
         else:
-            self._mute_btn.setText("🎙  MICROPHONE ACTIVE")
+            self._mute_btn.setText("🎙  Live")
             self._mute_btn.setStyleSheet(f"""
                 QPushButton {{
-                    background: #00140a; color: {C.GREEN};
-                    border: 1px solid {C.GREEN}; border-radius: 3px;
+                    background: rgba(48,209,88,26); color: {C.GREEN};
+                    border: 1px solid rgba(48,209,88,80); border-radius: 12px;
                 }}
-                QPushButton:hover {{ background: #001f10; }}
+                QPushButton:hover {{ background: rgba(48,209,88,55); color: {C.WHITE}; }}
             """)
 
     def _send(self):
@@ -5544,12 +6223,76 @@ class MainWindow(QMainWindow):
         if not txt: return
         self._input.clear()
         self._log.append_log(f"You: {txt}")
+        self._track_user_msg(txt)
         if self.on_text_command:
             threading.Thread(target=self.on_text_command, args=(txt,), daemon=True).start()
+
+    def _paint_status_chip(self, state: str):
+        chip = getattr(self, "_status_chip", None)
+        if chip is None:
+            return
+        m = {
+            "LISTENING":   ("Online",   C.GREEN, "48,209,88"),
+            "SPEAKING":    ("Speaking", C.PRI,   "124,92,255"),
+            "THINKING":    ("Thinking", C.ACC2,  "255,176,10"),
+            "PROCESSING":  ("Working",  C.ACC2,  "255,176,10"),
+            "MUTED":       ("Muted",    C.MUTED_C, "255,122,117"),
+            "INITIALISING":("Starting", C.PRI_DIM, "74,59,160"),
+        }
+        label, col, rgb = m.get(state, ("Idle", C.TEXT_DIM, "138,138,149"))
+        chip.setStyleSheet(
+            f"background: rgba({rgb},28); "
+            f"border: 1px solid rgba({rgb},90); "
+            f"border-radius: 12px; padding: 4px 12px;"
+        )
+        chip.setText(
+            f"<span style='color:{col}'>●</span> "
+            f"<span style='color:{C.TEXT}'>{label}</span>"
+        )
+
+    def _track_user_msg(self, txt: str):
+        """Update dashboard counters + histories on each user message."""
+        self._msg_count += 1
+        toks = max(1, len(txt.split()))
+        self._token_count += toks
+        self._msgs_hist.append(self._msg_count)
+        self._tokens_hist.append(self._token_count)
+        if len(self._msgs_hist) > 32:
+            del self._msgs_hist[:-32]
+        if len(self._tokens_hist) > 32:
+            del self._tokens_hist[:-32]
+        self._last_user_t = time.time()
+        # Broadcast to HUD so it can repaint tiles.
+        try:
+            self.hud.update()
+        except Exception:
+            pass
 
     def _apply_state(self, state: str):
         self.hud.state    = state
         self.hud.speaking = (state == "SPEAKING")
+        self._paint_status_chip(state)
+        # Latency = user-msg-time → first SPEAKING transition.
+        if state == "SPEAKING" and self._last_user_t is not None:
+            lat_ms = (time.time() - self._last_user_t) * 1000.0
+            self._last_lat_ms = lat_ms
+            self._latency_hist.append(lat_ms)
+            if len(self._latency_hist) > 32:
+                del self._latency_hist[:-32]
+            self._last_user_t = None
+        # Push metrics onto the HUD so its tiles can read from one place.
+        try:
+            self.hud.set_metrics(
+                msgs=self._msg_count,
+                tokens=self._token_count,
+                latency_ms=self._last_lat_ms,
+                tokens_hist=self._tokens_hist,
+                msgs_hist=self._msgs_hist,
+                latency_hist=self._latency_hist,
+                session_start=self._session_start,
+            )
+        except Exception:
+            pass
 
     def _check_config(self) -> bool:
         if not API_FILE.exists(): return False

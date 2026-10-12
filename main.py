@@ -1403,6 +1403,50 @@ class JarvisLive:
             _mic_dev  = audio_devices.resolve(_mic_name, "input")
             if _mic_dev is not None:
                 print(f"[JARVIS] 🎤 Input device: {_mic_name}")
+
+            # When no explicit device is chosen we hand sounddevice `None`, which
+            # it resolves to `sd.default.device[0]`. On macOS that index is `-1`
+            # whenever the host process has no microphone access — either the OS
+            # has no input hardware at all, or (far more often) the terminal /
+            # Python binary running this app has never been granted the
+            # Microphone privacy permission. Letting sounddevice open `-1`
+            # produces a cryptic `PortAudioError: Error querying device -1` and
+            # takes the whole TaskGroup down. Catch it here with a message the
+            # user can act on.
+            def _pick_any_input():
+                try:
+                    cands = audio_devices.list_devices("input")
+                except Exception:
+                    cands = []
+                for cand in cands:
+                    idx = audio_devices.resolve(cand, "input")
+                    if idx is not None:
+                        return cand, idx
+                return None, None
+
+            if _mic_dev is None:
+                try:
+                    import sounddevice as _sd
+                    _default_in = _sd.default.device[0] if _sd.default.device else -1
+                except Exception:
+                    _default_in = -1
+                if _default_in is None or _default_in < 0:
+                    _fb_name, _fb_idx = _pick_any_input()
+                    if _fb_idx is not None:
+                        print(f"[JARVIS] ⚠️  No system default microphone — using '{_fb_name}'")
+                        self.ui.write_log(
+                            f"SYS: No default microphone — using '{_fb_name}'."
+                        )
+                        _mic_dev = _fb_idx
+                    else:
+                        msg = ("No microphone available. On macOS grant "
+                               "Microphone permission to your terminal in "
+                               "System Settings → Privacy & Security → "
+                               "Microphone, then restart the app.")
+                        print(f"[JARVIS] ❌ {msg}")
+                        self.ui.write_log(f"SYS: {msg}")
+                        raise RuntimeError(msg)
+
             try:
                 _mic_stream = _open_mic(_mic_dev)
             except Exception as _e:

@@ -555,6 +555,13 @@ class DashboardServer:
         async def login_page():
             return HTMLResponse(self._login_html)
 
+        @app.get("/dashboard", response_class=HTMLResponse)
+        async def dashboard_preview():
+            path = STATIC_DIR / "jarvis-dashboard.html"
+            if not path.exists():
+                return JSONResponse({"error": "Not found"}, status_code=404)
+            return HTMLResponse(path.read_text(encoding="utf-8"))
+
         @app.get("/", response_class=HTMLResponse)
         async def index():
             # Auth is handled client-side via sessionStorage bearer token.
