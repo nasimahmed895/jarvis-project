@@ -1519,6 +1519,7 @@ class JarvisLive:
 
         try:
             while True:
+                _go_away = False
                 async for response in self.session.receive():
 
                     # ── Session resumption ───────────────────────────────────
@@ -1637,6 +1638,19 @@ class JarvisLive:
                             function_responses=fn_responses
                         )
                         await self._flush_pending_vision()
+
+                    if getattr(response, "go_away", None) is not None:
+                        tl = getattr(response.go_away, "time_left", "?")
+                        print(f"[JARVIS] ⏳ GoAway received (time_left={tl}) — reconnecting")
+                        self.ui.write_log("SYS: Session expiring — reconnecting seamlessly.")
+                        _go_away = True
+                        break  # exit async for cleanly; raise AFTER generator closes
+
+                if _go_away:
+                    raise _ReconnectSignal(keep_context=True)
+
+        except _ReconnectSignal:
+            raise
         except Exception as e:
             print(f"[JARVIS] ❌ Recv: {e}")
             traceback.print_exc()
@@ -2305,6 +2319,16 @@ class JarvisLive:
                     self.ui.write_log(
                         "SYS: Proactive audio unavailable — reconnecting without it."
                     )
+                    continue
+
+                # Session closed by server (timeout / policy) — drop stale
+                # resume handle and reconnect immediately. 1008 is expected
+                # once the Live API session reaches its max duration (~15 min).
+                if "1008" in err_str or "operation was aborted" in err_str.lower():
+                    self._resume_handle = None
+                    self._conn_backoff = 0
+                    self.ui.write_log("SYS: Session expired — reconnecting.")
+                    print("[JARVIS] 1008 session expiry — reconnecting clean.")
                     continue
 
                 # Invalid API key — stop hammering the API, prompt re-configuration
