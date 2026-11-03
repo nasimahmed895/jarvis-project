@@ -151,6 +151,12 @@ def resolve(accepted: bool) -> None:
                      name=f"confirm-{p.key}").start()
 
 
+def is_bound() -> bool:
+    """True once the HUD has wired this module. Callers can use it to skip
+    the gate in headless or test contexts rather than refusing outright."""
+    return _show_cb is not None
+
+
 def pending_title() -> str:
     """'' when nothing is waiting. Lets an action avoid stacking two banners."""
     with _lock:

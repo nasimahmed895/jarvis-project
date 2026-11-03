@@ -10,15 +10,23 @@ import subprocess
 import threading
 import webbrowser
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
+
+import urllib.request
 
 from playwright.async_api import (
     async_playwright,
+    Browser,
     BrowserContext,
     Page,
     Playwright,
     TimeoutError as PlaywrightTimeout,
 )
+
+try:
+    from core import confirm as _confirm
+except Exception:
+    _confirm = None  # core.confirm optional; permission/sensitive gates degrade gracefully
 _OS = platform.system()   # "Windows" | "Darwin" | "Linux"
 
 def _normalize_url(url: str) -> str:
@@ -345,6 +353,51 @@ def _detect_default_browser() -> str:
     return "chrome"
 
 
+# Default CDP debug ports — user chooses when they relaunch their browser with
+# --remote-debugging-port. We only probe; we never set.
+_CDP_DEFAULT_PORT = 9222
+
+def _cdp_probe(port: int) -> str | None:
+    """Returns the ws endpoint path from http://localhost:<port>/json/version,
+    or None if the port is not reachable."""
+    try:
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/json/version", timeout=1.5
+        ) as r:
+            import json as _json
+            data = _json.loads(r.read().decode("utf-8", "replace"))
+            return data.get("webSocketDebuggerUrl") or f"http://127.0.0.1:{port}"
+    except Exception:
+        return None
+
+
+def _cdp_launch_hint(browser: str, port: int) -> str:
+    """One-line instruction the user can read aloud and act on."""
+    name = _ALIASES.get(browser.lower().strip(), browser.lower().strip())
+    exe = {
+        "Darwin": {
+            "chrome":  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            "brave":   "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+            "edge":    "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+        },
+        "Windows": {
+            "chrome":  "chrome.exe",
+            "brave":   "brave.exe",
+            "edge":    "msedge.exe",
+        },
+        "Linux": {
+            "chrome":  "google-chrome",
+            "brave":   "brave-browser",
+            "edge":    "microsoft-edge",
+        },
+    }.get(_OS, {}).get(name, name)
+    profile = _real_profile_dir(name)
+    return (
+        f"To attach, quit {name} first, then relaunch it with: "
+        f'"{exe}" --remote-debugging-port={port} --user-data-dir="{profile}"'
+    )
+
+
 _SEARCH_ENGINES: dict[str, str] = {
     "google":     "https://www.google.com/search?q=",
     "bing":       "https://www.bing.com/search?q=",
@@ -447,9 +500,15 @@ class _BrowserSession:
     All browsers open on the real profile via launch_persistent_context.
     """
 
-    def __init__(self, browser_name: str):
+    def __init__(self, browser_name: str, cdp_port: int | None = None):
         self.browser_name = browser_name
         self._spec        = _resolve_browser(browser_name)
+
+        # When set, _launch() uses connect_over_cdp instead of
+        # launch_persistent_context — attaching to the browser the user already
+        # has open rather than starting a parallel process.
+        self._cdp_port: int | None = cdp_port
+        self._cdp_browser: Browser | None = None
 
         self._loop:    asyncio.AbstractEventLoop | None = None
         self._thread:  threading.Thread | None          = None
@@ -491,7 +550,15 @@ class _BrowserSession:
             asyncio.run_coroutine_threadsafe(self._async_close(), self._loop).result(10)
 
     async def _async_close(self):
-        if self._context:
+        # CDP: never close the real browser; disconnect only. Closing the
+        # context would also close the user's tabs.
+        if self._cdp_browser is not None:
+            try:
+                await self._cdp_browser.close()  # disconnects CDP, leaves Chrome alive
+            except Exception:
+                pass
+            self._cdp_browser = None
+        elif self._context:
             try:
                 await self._context.close()
             except Exception:
@@ -519,6 +586,23 @@ class _BrowserSession:
         Does nothing if the context is already open.
         """
         if self._context is not None:
+            return
+
+        # CDP attach: user already started their own browser with
+        # --remote-debugging-port — we connect, we do not spawn a new one.
+        if self._cdp_port is not None:
+            endpoint = _cdp_probe(self._cdp_port)
+            if endpoint is None:
+                raise RuntimeError(
+                    f"CDP port {self._cdp_port} not reachable. "
+                    f"{_cdp_launch_hint(self.browser_name, self._cdp_port)}"
+                )
+            self._cdp_browser = await self._pw.chromium.connect_over_cdp(endpoint)
+            # Chrome exposes exactly one default BrowserContext over CDP.
+            ctxs = self._cdp_browser.contexts
+            self._context = ctxs[0] if ctxs else await self._cdp_browser.new_context()
+            self._page = await self._adopt_page()
+            print(f"[Browser] 🔗 Attached to running {self.browser_name} on :{self._cdp_port}")
             return
 
         if self._spec is None:
@@ -783,6 +867,60 @@ class _BrowserSession:
                 continue
         return f"Could not find input: '{description}'"
 
+    async def list_tabs(self) -> str:
+        await self._launch()
+        pages = list(self._context.pages) if self._context else []
+        if not pages:
+            return "No open tabs."
+        lines = []
+        for i, p in enumerate(pages):
+            if p.is_closed():
+                continue
+            try:
+                title = await p.title()
+            except Exception:
+                title = "(no title)"
+            marker = " ◀ active" if p is self._page else ""
+            lines.append(f"  [{i}] {title[:60]}  —  {p.url[:80]}{marker}")
+        return "Open tabs:\n" + "\n".join(lines)
+
+    async def switch_tab(self, index: int | None = None,
+                         title_contains: str | None = None) -> str:
+        await self._launch()
+        pages = [p for p in self._context.pages if not p.is_closed()]
+        if not pages:
+            return "No open tabs."
+        target: Page | None = None
+        if index is not None:
+            if 0 <= index < len(pages):
+                target = pages[index]
+            else:
+                return f"Tab index {index} out of range (0..{len(pages)-1})."
+        elif title_contains:
+            needle = title_contains.lower()
+            for p in pages:
+                try:
+                    t = (await p.title()).lower()
+                except Exception:
+                    t = ""
+                if needle in t or needle in p.url.lower():
+                    target = p
+                    break
+            if target is None:
+                return f"No tab matches: '{title_contains}'"
+        else:
+            return "Specify index or title_contains."
+        self._page = target
+        try:
+            await target.bring_to_front()
+        except Exception:
+            pass
+        try:
+            title = await target.title()
+        except Exception:
+            title = target.url
+        return f"Switched to tab: {title[:60]}"
+
     async def new_tab(self, url: str = "") -> str:
         page = await self._get_page()
         ctx  = page.context
@@ -847,6 +985,9 @@ class _SessionRegistry:
         self._active_browser:  str                        = ""
         self._lock             = threading.Lock()
         self._last_native_url: str                        = ""
+        # Per-process consent — the user says yes once per browser per session.
+        # Not persisted: a new JARVIS launch asks again.
+        self._consent:         dict[str, bool]            = {}
 
     def has(self, browser_name: str | None = None) -> bool:
         """Is there an active automation session for this browser (or any)?"""
@@ -864,20 +1005,33 @@ class _SessionRegistry:
         url, self._last_native_url = self._last_native_url, ""
         return url
 
-    def _get_or_create(self, browser_name: str) -> _BrowserSession:
+    def consented(self, browser_name: str) -> bool:
+        name = _ALIASES.get(browser_name.lower().strip(), browser_name.lower().strip())
+        with self._lock:
+            return bool(self._consent.get(name))
+
+    def grant(self, browser_name: str) -> None:
+        name = _ALIASES.get(browser_name.lower().strip(), browser_name.lower().strip())
+        with self._lock:
+            self._consent[name] = True
+
+    def _get_or_create(self, browser_name: str,
+                        cdp_port: int | None = None) -> _BrowserSession:
         with self._lock:
             if browser_name not in self._sessions:
-                sess = _BrowserSession(browser_name)
+                sess = _BrowserSession(browser_name, cdp_port=cdp_port)
                 sess.start()
                 self._sessions[browser_name] = sess
-                print(f"[Registry] New session: {browser_name}")
+                print(f"[Registry] New session: {browser_name}"
+                      + (f" (CDP :{cdp_port})" if cdp_port else ""))
             return self._sessions[browser_name]
 
-    def get(self, browser_name: str | None = None) -> _BrowserSession:
+    def get(self, browser_name: str | None = None,
+             cdp_port: int | None = None) -> _BrowserSession:
         if not browser_name:
             browser_name = self._active_browser or _detect_default_browser()
         browser_name = _ALIASES.get(browser_name.lower().strip(), browser_name.lower().strip())
-        sess = self._get_or_create(browser_name)
+        sess = self._get_or_create(browser_name, cdp_port=cdp_port)
         self._active_browser = browser_name
         return sess
 
@@ -923,6 +1077,72 @@ class _SessionRegistry:
 
 _registry = _SessionRegistry()
 
+# Actions that neither open a session nor touch the user's browser — safe to
+# run without the "may I access your browser?" gate.
+_NO_CONSENT_ACTIONS = {
+    "switch", "list_browsers", "close", "close_all", "attach_help",
+}
+
+# Actions that submit data, download, or spend money — must go through
+# core/confirm.py before they run.
+_SENSITIVE_ACTIONS = {"fill_form", "download"}
+
+
+def _gate_permission(browser: str | None, action: str,
+                     parameters: dict) -> str | None:
+    """
+    First-touch permission gate. Returns a string the model should speak if
+    consent is still needed (and parks the actual work behind the HUD banner),
+    or None if the action may proceed immediately.
+    """
+    if action in _NO_CONSENT_ACTIONS:
+        return None
+    name = _ALIASES.get(
+        (browser or _registry._active_browser or _detect_default_browser())
+        .lower().strip(),
+        (browser or _registry._active_browser or _detect_default_browser()).lower().strip(),
+    )
+    if _registry.consented(name):
+        return None
+    if _confirm is None or not _confirm.is_bound():
+        # No HUD bound (headless / test harness). Grant implicitly rather than
+        # jamming the assistant.
+        _registry.grant(name)
+        return None
+
+    def _on_accept() -> str:
+        _registry.grant(name)
+        # Re-dispatch the exact same call now that consent is granted.
+        return browser_control(parameters)
+
+    return _confirm.request(
+        key=f"browser-access-{name}",
+        title="Access your personal browser",
+        detail=f"Allow JARVIS to control {name}?",
+        run=_on_accept,
+    )
+
+
+def _gate_sensitive(action: str, parameters: dict,
+                    run: Callable[[], str]) -> str:
+    """Park a sensitive action behind the HUD banner. Returns the sentence
+    the model should speak while the user confirms."""
+    if _confirm is None or not _confirm.is_bound():
+        return run()
+    detail = ""
+    if action == "fill_form":
+        fields = parameters.get("fields", {}) or {}
+        detail = f"Fill & submit {len(fields)} field(s)."
+    elif action == "download":
+        detail = f"Download: {parameters.get('url', '')[:120]}"
+    return _confirm.request(
+        key=f"browser-{action}",
+        title=f"Browser: {action}",
+        detail=detail or action,
+        run=run,
+    )
+
+
 def browser_control(
     parameters:    dict = None,
     response=None,
@@ -933,6 +1153,13 @@ def browser_control(
     action  = params.get("action", "").lower().strip()
     browser = params.get("browser", "").lower().strip() or None
     result  = "Unknown action."
+
+    # Permission gate — asked once per browser per JARVIS session. Returns a
+    # [CONFIRMATION_PENDING] sentence; the real work runs when the user clicks.
+    gated = _gate_permission(browser, action, params)
+    if gated is not None:
+        _log(player, "Awaiting browser-access consent.")
+        return gated
 
     if action == "switch":
         target = browser or params.get("target", "").lower().strip()
@@ -953,6 +1180,31 @@ def browser_control(
     if action == "close":
         target = browser or _registry._active_browser
         result = _registry.close_one(target) if target else "No browser specified."
+        _log(player, result)
+        return result
+
+    if action == "attach":
+        port = int(params.get("port", _CDP_DEFAULT_PORT))
+        target = browser or _detect_default_browser()
+        if _cdp_probe(port) is None:
+            result = (f"Cannot attach — nothing listening on CDP port {port}. "
+                      + _cdp_launch_hint(target, port))
+            _log(player, result)
+            return result
+        try:
+            sess = _registry.get(target, cdp_port=port)
+            # Force the launch so attach failures surface here, not on next action.
+            sess.run(sess.get_url())
+            result = f"Attached to running {target} on :{port}."
+        except Exception as e:
+            result = f"Attach failed: {e}"
+        _log(player, result)
+        return result
+
+    if action == "attach_help":
+        target = browser or _detect_default_browser()
+        port   = int(params.get("port", _CDP_DEFAULT_PORT))
+        result = _cdp_launch_hint(target, port)
         _log(player, result)
         return result
 
@@ -1020,7 +1272,18 @@ def browser_control(
         elif action == "scroll":
             result = sess.run(sess.scroll(params.get("direction", "down"), int(params.get("amount", 500))))
         elif action == "fill_form":
-            result = sess.run(sess.fill_form(params.get("fields", {})))
+            fields = params.get("fields", {}) or {}
+            def _do_fill() -> str:
+                return sess.run(sess.fill_form(fields))
+            result = _gate_sensitive("fill_form", params, _do_fill)
+        elif action == "list_tabs":
+            result = sess.run(sess.list_tabs())
+        elif action == "switch_tab":
+            idx = params.get("index")
+            result = sess.run(sess.switch_tab(
+                index=int(idx) if idx is not None else None,
+                title_contains=params.get("title_contains"),
+            ))
         elif action == "smart_click":
             result = sess.run(sess.smart_click(params.get("description", "")))
         elif action == "smart_type":
@@ -1063,13 +1326,13 @@ def _log(player, text: str):
 # ── Tool declaration (auto-discovered by core/action_loader.py) ──────────────
 TOOL = {
     "name": "browser_control",
-    "description": "Controls any web browser. Use for: opening websites, searching the web, clicking elements, filling forms, scrolling, screenshots, navigation, any web-based task. Simple open/search requests launch the user's own browser normally (their real profile and logged-in accounts); interactive actions (click, type, fill_form...) attach an automation browser. Always pass the 'browser' parameter when the user specifies a browser (e.g. 'open in Edge', 'use Firefox', 'open Chrome'). Multiple browsers can run simultaneously.",
+    "description": "Controls any web browser. Use for: opening websites, searching the web, clicking elements, filling forms, scrolling, screenshots, navigation, any web-based task. Simple open/search requests launch the user's own browser normally (their real profile and logged-in accounts); interactive actions (click, type, fill_form...) attach an automation browser. Use 'attach' to connect to a browser the user has already started with --remote-debugging-port (defaults to 9222); use 'attach_help' to tell the user how to relaunch it. The first interactive action asks the user for permission on the HUD before anything touches their browser; fill_form also asks for confirmation before submitting. Use 'list_tabs' and 'switch_tab' to work with multiple tabs in the same browser. Always pass the 'browser' parameter when the user specifies a browser.",
     "parameters": {
         "type": "OBJECT",
         "properties": {
             "action": {
                 "type": "STRING",
-                "description": "go_to | search | click | type | scroll | fill_form | smart_click | smart_type | get_text | get_url | press | new_tab | close_tab | screenshot | back | forward | reload | switch | list_browsers | close | close_all"
+                "description": "go_to | search | click | type | scroll | fill_form | smart_click | smart_type | get_text | get_url | press | new_tab | close_tab | list_tabs | switch_tab | screenshot | back | forward | reload | attach | attach_help | switch | list_browsers | close | close_all"
             },
             "browser": {
                 "type": "STRING",
@@ -1122,6 +1385,18 @@ TOOL = {
             "clear_first": {
                 "type": "BOOLEAN",
                 "description": "Clear field before typing (default: true)"
+            },
+            "port": {
+                "type": "INTEGER",
+                "description": "CDP debug port for attach / attach_help (default: 9222)"
+            },
+            "index": {
+                "type": "INTEGER",
+                "description": "Tab index for switch_tab (0-based)"
+            },
+            "title_contains": {
+                "type": "STRING",
+                "description": "Substring of tab title or URL for switch_tab"
             }
         },
         "required": [
