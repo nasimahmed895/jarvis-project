@@ -2321,14 +2321,15 @@ class JarvisLive:
                     )
                     continue
 
-                # Session closed by server (timeout / policy) — drop stale
-                # resume handle and reconnect immediately. 1008 is expected
+                # Session closed by server (timeout / policy). 1008 is expected
                 # once the Live API session reaches its max duration (~15 min).
+                # Keep the resume handle so context survives — if the server
+                # rejects the handle on reconnect, the _resumed_with branch
+                # above drops it and the next attempt starts clean.
                 if "1008" in err_str or "operation was aborted" in err_str.lower():
-                    self._resume_handle = None
                     self._conn_backoff = 0
-                    self.ui.write_log("SYS: Session expired — reconnecting.")
-                    print("[JARVIS] 1008 session expiry — reconnecting clean.")
+                    self.ui.write_log("SYS: Session expired — resuming.")
+                    print("[JARVIS] 1008 session expiry — attempting resume.")
                     continue
 
                 # Invalid API key — stop hammering the API, prompt re-configuration
