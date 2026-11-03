@@ -367,6 +367,31 @@ TOOL_DECLARATIONS = [
         }
     },
     {
+        "name": "vision_stream",
+        "description": (
+            "Turn continuous visual perception on or off. Unlike screen_process "
+            "(which captures ONE frame when asked), this feeds a steady stream "
+            "of frames from the user's camera or screen so you can see what is "
+            "happening in real time. Use 'start' when the user asks you to "
+            "watch, keep an eye on, follow, or observe their camera/screen "
+            "live; 'stop' when they want it off; 'pause'/'resume' for a brief "
+            "break; 'status' to check. First 'start' per source asks the user "
+            "for explicit permission on the HUD before any frame leaves."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "action": {"type": "STRING",
+                           "description": "start | stop | pause | resume | status"},
+                "source": {"type": "STRING",
+                           "description": "camera | screen (required for start)"},
+                "fps":    {"type": "NUMBER",
+                           "description": "Frames per second to send (default 1.0, cap 2.0)"},
+            },
+            "required": ["action"],
+        }
+    },
+    {
         "name": "close_camera",
         "description": (
             "Closes the live camera view shown on screen. "
@@ -551,6 +576,16 @@ class JarvisLive:
         self._vision_close_pending = False   # True after vision injected; next turn_complete closes camera
         self._vision_last_time     = 0.0     # monotonic time of last screen_process call (cooldown guard)
         self._vision_busy          = False   # True while a vision capture/inject cycle is in flight
+        # ── Continuous vision streaming (vision_stream tool) ─────────────
+        # Separate from one-shot screen_process: this feeds Gemini Live a
+        # steady trickle of frames so the model can see what's happening.
+        # Scene-change filter in screen_processor keeps idle scenes cheap.
+        self._vstream_task:    asyncio.Task | None = None
+        self._vstream_src:     str  | None   = None   # "camera" | "screen"
+        self._vstream_paused:  bool          = False
+        self._vstream_consent: dict[str, bool] = {}   # src → granted this session
+        self._vstream_prev_hist = None                # last frame histogram
+        self._vstream_fps:     float         = 1.0    # frames/sec target
         self._interrupted          = False   # True while draining audio after user interrupt
         # Transcript-driven mouth shapes for the avatar. Fed from the receive
         # loop as words arrive, drained by the playback loop against the audio.
@@ -1205,6 +1240,60 @@ class JarvisLive:
                 self.ui.stop_camera_stream()
                 result = "Camera closed."
 
+            elif name == "vision_stream":
+                vaction = (args.get("action") or "").lower().strip()
+                vsrc    = (args.get("source") or "").lower().strip()
+                vfps    = args.get("fps")
+                if vaction == "status":
+                    if self._vstream_task and not self._vstream_task.done():
+                        state = "paused" if self._vstream_paused else "live"
+                        result = (f"Vision stream {state}: {self._vstream_src} "
+                                  f"@ {self._vstream_fps:.1f} fps.")
+                    else:
+                        result = "Vision stream not running."
+                elif vaction == "stop":
+                    result = self._stop_vision_stream()
+                elif vaction == "pause":
+                    result = self._pause_vision_stream(True)
+                elif vaction == "resume":
+                    result = self._pause_vision_stream(False)
+                elif vaction == "start":
+                    # Trust mode: this is the user's own machine; skip the
+                    # "may I watch?" ask and go straight to streaming.
+                    try:
+                        from actions.browser_control import _trust_me as _trusted
+                        _is_trusted = _trusted()
+                    except Exception:
+                        _is_trusted = False
+                    if vsrc not in ("camera", "screen"):
+                        result = "Specify source: 'camera' or 'screen'."
+                    elif _is_trusted:
+                        self._vstream_consent[vsrc] = True
+                        fps_val = float(vfps) if vfps is not None else None
+                        if fps_val is not None:
+                            fps_val = max(0.1, min(2.0, fps_val))
+                        result = self._start_vision_stream(vsrc, fps_val)
+                    elif not self._vstream_consent.get(vsrc):
+                        # First request this session — park behind the HUD gate.
+                        # The model should NOT claim it is already watching.
+                        def _grant_and_start(src=vsrc, fps=vfps):
+                            self._vstream_consent[src] = True
+                            return self._start_vision_stream(src, fps)
+                        result = confirm_gate.request(
+                            key=f"vision-{vsrc}",
+                            title=f"Watch {vsrc} continuously",
+                            detail=(f"Allow JARVIS to stream frames from your "
+                                    f"{vsrc} to the model until you say stop?"),
+                            run=_grant_and_start,
+                        )
+                    else:
+                        fps_val = float(vfps) if vfps is not None else None
+                        if fps_val is not None:
+                            fps_val = max(0.1, min(2.0, fps_val))
+                        result = self._start_vision_stream(vsrc, fps_val)
+                else:
+                    result = "Unknown vision_stream action."
+
             elif name == "system_status":
                 r = await loop.run_in_executor(None, get_system_status)
                 result = str(r)
@@ -1512,6 +1601,108 @@ class JarvisLive:
         else:
             self._vision_busy = False
         return True
+
+    async def _stream_vision(self, src: str):
+        """
+        Continuous visual perception loop. Captures a frame at `_vstream_fps`,
+        skips near-duplicates via the scene-diff filter in screen_processor,
+        and forwards the JPEG to Gemini Live over the realtime video channel.
+        Cancelled via `_stop_vision_stream()`.
+        """
+        from actions.screen_processor import _frame_hist, frame_changed
+        loop     = asyncio.get_event_loop()
+        capture  = _capture_camera if src == "camera" else _capture_screen
+        label    = "camera" if src == "camera" else "screen"
+        interval = max(0.1, 1.0 / max(0.1, self._vstream_fps))
+        sent, skipped = 0, 0
+        try:
+            if src == "camera":
+                try:
+                    self.ui.start_camera_stream()
+                except Exception:
+                    pass
+            self.ui.write_log(f"SYS: 🔴 RECORDING {label} (~{self._vstream_fps:.1f} fps)")
+            print(f"[Vision] 🔴 Stream started: {label}")
+
+            while self._vstream_src == src:
+                if self._vstream_paused:
+                    await asyncio.sleep(0.25)
+                    continue
+                try:
+                    img_b, mime_t = await loop.run_in_executor(None, capture)
+                except Exception as e:
+                    print(f"[Vision] stream capture error ({label}): {e}")
+                    await asyncio.sleep(interval)
+                    continue
+
+                hist = _frame_hist(img_b)
+                if frame_changed(self._vstream_prev_hist, hist):
+                    self._vstream_prev_hist = hist
+                    try:
+                        await self.session.send_realtime_input(
+                            video=types.Blob(data=img_b, mime_type=mime_t),
+                        )
+                        sent += 1
+                    except Exception as e:
+                        print(f"[Vision] stream send error: {e}")
+                        break
+                else:
+                    skipped += 1
+
+                await asyncio.sleep(interval)
+        except asyncio.CancelledError:
+            pass
+        finally:
+            print(f"[Vision] ⏹ Stream ended: {label} (sent={sent}, skipped={skipped})")
+            self._vstream_prev_hist = None
+            if src == "camera":
+                try:
+                    self.ui.stop_camera_stream()
+                except Exception:
+                    pass
+
+    def _start_vision_stream(self, src: str, fps: float | None = None) -> str:
+        """Public — called by the vision_stream tool."""
+        src = (src or "").lower().strip()
+        if src not in ("camera", "screen"):
+            return "Vision source must be 'camera' or 'screen'."
+        if self._vstream_task is not None and not self._vstream_task.done():
+            if self._vstream_src == src:
+                return f"Vision stream already running: {src}."
+            # Switching source: cancel current, start new.
+            self._vstream_task.cancel()
+
+        if fps is not None:
+            self._vstream_fps = float(fps)
+        self._vstream_src    = src
+        self._vstream_paused = False
+
+        async def _spawn():
+            self._vstream_task = asyncio.create_task(self._stream_vision(src))
+        try:
+            asyncio.get_event_loop().create_task(_spawn())
+        except RuntimeError:
+            # Fallback for callers off the main loop
+            if self._loop:
+                asyncio.run_coroutine_threadsafe(_spawn(), self._loop)
+        return f"Vision stream started: {src} at {self._vstream_fps:.1f} fps."
+
+    def _stop_vision_stream(self) -> str:
+        if self._vstream_task is None or self._vstream_task.done():
+            self._vstream_src = None
+            return "Vision stream not running."
+        self._vstream_src = None
+        self._vstream_task.cancel()
+        self.ui.write_log("SYS: ⏹ Vision stream stopped")
+        return "Vision stream stopped."
+
+    def _pause_vision_stream(self, paused: bool) -> str:
+        if self._vstream_task is None or self._vstream_task.done():
+            return "Vision stream not running."
+        self._vstream_paused = paused
+        self.ui.write_log("SYS: ⏸ Vision paused" if paused
+                          else "SYS: ▶ Vision resumed")
+        return "Vision paused." if paused else "Vision resumed."
 
     async def _receive_audio(self):
         print("[JARVIS] 👂 Recv started")
@@ -2188,6 +2379,15 @@ class JarvisLive:
                     self._vision_busy          = False
                     self._vision_last_time     = 0.0
                     self._interrupted          = False
+                    # Cancel any vision stream bound to the dead session —
+                    # its send_realtime_input calls would target a closed
+                    # websocket. User can resume with vision_stream start.
+                    if self._vstream_task and not self._vstream_task.done():
+                        self._vstream_task.cancel()
+                    self._vstream_task     = None
+                    self._vstream_src      = None
+                    self._vstream_paused   = False
+                    self._vstream_prev_hist = None
 
                     print("[JARVIS] Connected.")
                     if _resumed_with:

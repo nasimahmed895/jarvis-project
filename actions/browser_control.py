@@ -27,6 +27,33 @@ try:
     from core import confirm as _confirm
 except Exception:
     _confirm = None  # core.confirm optional; permission/sensitive gates degrade gracefully
+
+try:
+    from actions import _mac_chrome as _macchrome
+except Exception:
+    _macchrome = None  # optional — only used on macOS for Chromium browsers
+
+
+# Trust mode is a per-user "this is MY assistant on MY machine" opt-in. When
+# the config flag is set, "may I access your browser?" and "may I watch your
+# camera?" style gates auto-grant. Genuinely destructive actions (quitting
+# the user's running Chrome, submitting a form with their data, powering the
+# machine off) KEEP asking — trust mode is a convenience switch, not a way to
+# surrender those.
+_TRUST_CFG_KEY = "jarvis_trust_me"
+
+
+def _trust_me() -> bool:
+    try:
+        from actions.screen_processor import _load_config
+        return bool(_load_config().get(_TRUST_CFG_KEY, False))
+    except Exception:
+        return False
+
+
+def _set_trust(flag: bool) -> None:
+    from actions.screen_processor import _save_config_key
+    _save_config_key(_TRUST_CFG_KEY, bool(flag))
 _OS = platform.system()   # "Windows" | "Darwin" | "Linux"
 
 def _normalize_url(url: str) -> str:
@@ -371,6 +398,105 @@ def _cdp_probe(port: int) -> str | None:
         return None
 
 
+def _cdp_exe_for(browser: str) -> str | None:
+    """OS-specific binary path for the CDP relaunch, or None if unknown."""
+    name = _ALIASES.get(browser.lower().strip(), browser.lower().strip())
+    table = {
+        "Darwin": {
+            "chrome":  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            "brave":   "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+            "edge":    "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+        },
+        "Windows": {
+            "chrome":  shutil.which("chrome") or _find_exe_windows("chrome"),
+            "brave":   shutil.which("brave")  or _find_exe_windows("brave"),
+            "edge":    shutil.which("msedge") or _find_exe_windows("msedge"),
+        },
+        "Linux": {
+            "chrome":  shutil.which("google-chrome") or shutil.which("google-chrome-stable"),
+            "brave":   shutil.which("brave-browser") or shutil.which("brave"),
+            "edge":    shutil.which("microsoft-edge"),
+        },
+    }
+    return table.get(_OS, {}).get(name)
+
+
+def _quit_running_browser(browser: str) -> None:
+    """Terminate every process matching this browser so we can relaunch it
+    with the debug port. Needed because Chrome refuses the debug flag when
+    another instance is already holding the user profile."""
+    try:
+        import psutil as _ps
+    except Exception:
+        return
+    name = _ALIASES.get(browser.lower().strip(), browser.lower().strip())
+    needles = {
+        "chrome":   ("chrome", "chromium"),
+        "brave":    ("brave",),
+        "edge":     ("msedge", "microsoft edge"),
+        "vivaldi":  ("vivaldi",),
+        "opera":    ("opera",),
+        "operagx":  ("opera gx",),
+    }.get(name, (name,))
+    victims = []
+    for p in _ps.process_iter(attrs=("name", "exe")):
+        try:
+            info = p.info or {}
+            hay  = f"{(info.get('name') or '').lower()} {(info.get('exe') or '').lower()}"
+        except Exception:
+            continue
+        if any(n in hay for n in needles):
+            victims.append(p)
+    for p in victims:
+        try:
+            p.terminate()
+        except Exception:
+            pass
+    gone, alive = _ps.wait_procs(victims, timeout=4)
+    for p in alive:
+        try:
+            p.kill()
+        except Exception:
+            pass
+
+
+def _start_debug_browser(browser: str, port: int = _CDP_DEFAULT_PORT) -> str:
+    """Relaunch the user's browser with the CDP debug port exposed, pointing
+    at the user's REAL profile so logged-in accounts and extensions survive."""
+    name = _ALIASES.get(browser.lower().strip(), browser.lower().strip())
+    exe  = _cdp_exe_for(name)
+    if not exe:
+        return (f"I don't know where {name} is installed on this machine. "
+                f"Please launch it manually with --remote-debugging-port={port}.")
+    profile = _real_profile_dir(name)
+    _quit_running_browser(name)
+    try:
+        subprocess.Popen(
+            [exe, f"--remote-debugging-port={port}",
+                  f"--user-data-dir={profile}",
+                  "--restore-last-session"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    except Exception as e:
+        return f"Could not launch {name} in debug mode: {e}"
+    # Wait up to 10s for the debug port to come up.
+    import time as _t
+    for _ in range(40):
+        if _cdp_probe(port) is not None:
+            # Auto-attach so the next interactive action just works.
+            try:
+                sess = _registry.get(name, cdp_port=port)
+                sess.run(sess.get_url())
+            except Exception as e:
+                return (f"{name} relaunched in debug mode on :{port}, "
+                        f"but attach failed: {e}")
+            return (f"Relaunched {name} with debug port :{port} and attached. "
+                    f"You're logged in as before — your real profile is in use.")
+        _t.sleep(0.25)
+    return (f"Relaunched {name}, but port :{port} did not come up within 10s. "
+            f"Try again, or launch manually.")
+
+
 def _cdp_launch_hint(browser: str, port: int) -> str:
     """One-line instruction the user can read aloud and act on."""
     name = _ALIASES.get(browser.lower().strip(), browser.lower().strip())
@@ -396,6 +522,52 @@ def _cdp_launch_hint(browser: str, port: int) -> str:
         f"To attach, quit {name} first, then relaunch it with: "
         f'"{exe}" --remote-debugging-port={port} --user-data-dir="{profile}"'
     )
+
+
+# Match a process name/exe path to a known browser slug. Chromium browsers all
+# look like "Google Chrome Helper (Renderer)" etc on macOS and like
+# "chrome.exe" on Windows — matching on substring of the main exe plus the
+# cmdline covers both. Opera renderer processes also run under opera.exe, so
+# we uniq by slug.
+_BROWSER_SIGS: list[tuple[str, tuple[str, ...]]] = [
+    ("operagx",  ("opera gx", "operagx")),
+    ("brave",    ("brave",)),
+    ("edge",     ("msedge", "microsoft edge")),
+    ("vivaldi",  ("vivaldi",)),
+    ("opera",    ("opera",)),           # must come after operagx
+    ("firefox",  ("firefox",)),
+    ("safari",   ("safari",)),
+    ("chrome",   ("chrome", "chromium")),
+]
+
+
+def _detect_running_browsers() -> set[str]:
+    """Scan running processes for browsers the user has open."""
+    try:
+        import psutil as _ps
+    except Exception:
+        return set()
+    found: set[str] = set()
+    for p in _ps.process_iter(attrs=("name", "exe")):
+        try:
+            info = p.info or {}
+            name = (info.get("name") or "").lower()
+            exe  = (info.get("exe")  or "").lower()
+        except Exception:
+            continue
+        hay = f"{name} {exe}"
+        for slug, needles in _BROWSER_SIGS:
+            if slug in found:
+                continue
+            if any(n in hay for n in needles):
+                # macOS Safari also matches "safari services" etc. Filter out
+                # obvious helpers so we don't report "safari" from a system
+                # XPC helper when the user doesn't actually have Safari open.
+                if "helper" in name or "service" in name:
+                    continue
+                found.add(slug)
+                break
+    return found
 
 
 _SEARCH_ENGINES: dict[str, str] = {
@@ -1065,14 +1237,32 @@ class _SessionRegistry:
         return "All browsers closed: " + (", ".join(names) if names else "none")
 
     def list_sessions(self) -> str:
+        """
+        Lists every browser the user has open, not just the ones JARVIS has
+        attached to. Playwright-controlled sessions were the only thing shown
+        before, which read as "no browsers open" when the user obviously had
+        Chrome on screen — confusing and wrong.
+        """
         with self._lock:
-            if not self._sessions:
-                return "No active browser sessions."
-            lines = []
-            for name in self._sessions:
-                marker = " ◀ active" if name == self._active_browser else ""
-                lines.append(f"  • {name}{marker}")
-            return "Open browsers:\n" + "\n".join(lines)
+            attached = dict(self._sessions)
+            active   = self._active_browser
+
+        running = _detect_running_browsers()
+
+        lines: list[str] = []
+        if attached:
+            lines.append("JARVIS-controlled:")
+            for name in attached:
+                mk = " ◀ active" if name == active else ""
+                lines.append(f"  • {name}{mk}")
+        if running:
+            lines.append("Running on your computer:")
+            for name in sorted(running):
+                attached_mk = "  (controllable — call attach)" if name not in attached else ""
+                lines.append(f"  • {name}{attached_mk}")
+        if not lines:
+            return "No browsers detected."
+        return "\n".join(lines)
 
 
 _registry = _SessionRegistry()
@@ -1103,6 +1293,12 @@ def _gate_permission(browser: str | None, action: str,
         (browser or _registry._active_browser or _detect_default_browser()).lower().strip(),
     )
     if _registry.consented(name):
+        return None
+    if _trust_me():
+        # Trust mode: this is the user's machine; they've said once that
+        # browser access is pre-approved. Record it so later actions skip
+        # even the probe.
+        _registry.grant(name)
         return None
     if _confirm is None or not _confirm.is_bound():
         # No HUD bound (headless / test harness). Grant implicitly rather than
@@ -1141,6 +1337,89 @@ def _gate_sensitive(action: str, parameters: dict,
         detail=detail or action,
         run=run,
     )
+
+
+# Actions that AppleScript can honour on the user's RUNNING Chrome/Brave/Edge
+# without any CDP relaunch. Everything else (fill_form, screenshot,
+# new_tab/close_tab across windows, back/forward...) still goes to Playwright.
+_APPLESCRIPT_ACTIONS = {
+    "get_text", "get_url", "scroll", "list_tabs", "switch_tab",
+    "press", "click", "smart_click",
+}
+
+
+def _try_applescript(browser: str | None, action: str, params: dict) -> str | None:
+    """Returns a result string if AppleScript handled the action on the
+    user's real browser; None if it couldn't (not macOS, browser unknown,
+    not running, or AppleScript errored) so the caller falls through to
+    Playwright."""
+    if _OS != "Darwin" or _macchrome is None:
+        return None
+    if action not in _APPLESCRIPT_ACTIONS:
+        return None
+    name = _ALIASES.get(
+        (browser or _registry._active_browser or _detect_default_browser())
+        .lower().strip(),
+        (browser or _registry._active_browser or _detect_default_browser()).lower().strip(),
+    )
+    if _macchrome.app_name(name) is None:
+        return None  # Firefox/Safari: no Chromium AppleScript dict
+    if not _macchrome.is_running(name):
+        return None  # Nothing to control
+    try:
+        if action == "get_url":
+            return _macchrome.active_url(name)
+        if action == "get_text":
+            return _macchrome.get_text(name)
+        if action == "scroll":
+            return _macchrome.scroll(
+                name,
+                direction=params.get("direction", "down"),
+                amount=int(params.get("amount", 600)),
+            )
+        if action == "list_tabs":
+            tabs = _macchrome.list_tabs(name)
+            if not tabs:
+                return "No open tabs."
+            lines = []
+            for i, t in enumerate(tabs):
+                mk = " ◀ active" if t["active"] else ""
+                lines.append(f"  [{i}] {t['title'][:60]}  —  {t['url'][:80]}{mk}")
+            return "Open tabs:\n" + "\n".join(lines)
+        if action == "switch_tab":
+            idx = params.get("index")
+            return _macchrome.switch_tab(
+                name,
+                index=int(idx) if idx is not None else None,
+                title_contains=params.get("title_contains"),
+            )
+        if action == "click" or action == "smart_click":
+            text = params.get("text") or params.get("description") or ""
+            if not text:
+                return None  # selector-based clicks are more precise via Playwright
+            return _macchrome.click_text(name, text)
+        if action == "press":
+            key = (params.get("key") or "Enter").lower()
+            js_map = {
+                "enter":  "document.activeElement && document.activeElement.form && document.activeElement.form.requestSubmit && document.activeElement.form.requestSubmit();",
+                "escape": "document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape'}));",
+            }
+            if key in js_map:
+                _macchrome.execute_js(name, js_map[key])
+                return f"Pressed: {key}"
+            return None  # unknown key — fall back to Playwright
+    except Exception as e:
+        err = str(e)
+        print(f"[Browser][AppleScript] {name} {action} failed: {err[:200]}")
+        # -1743 = macOS Automation permission denied. First-run case — tell
+        # the user to allow it in System Settings, then fall through.
+        if "-1743" in err:
+            return (f"macOS blocked AppleScript access to {name}. "
+                    f"Open System Settings → Privacy & Security → Automation, "
+                    f"find your Terminal / Python app, and enable {_macchrome.app_name(name)}. "
+                    f"Then try again.")
+        return None
+    return None
 
 
 def browser_control(
@@ -1201,6 +1480,42 @@ def browser_control(
         _log(player, result)
         return result
 
+    if action == "start_debug":
+        target = browser or _detect_default_browser()
+        port   = int(params.get("port", _CDP_DEFAULT_PORT))
+        # Destructive — closes the user's running browser. Must confirm on HUD.
+        if _confirm is not None and _confirm.is_bound():
+            def _do_start() -> str:
+                return _start_debug_browser(target, port)
+            result = _confirm.request(
+                key=f"browser-debug-{target}",
+                title=f"Relaunch {target} in control mode",
+                detail=(f"Quit any open {target} windows and reopen it in debug "
+                        f"mode on port {port} so I can control it directly. "
+                        f"Your real profile and logins are preserved."),
+                run=_do_start,
+            )
+        else:
+            result = _start_debug_browser(target, port)
+        _log(player, result)
+        return result
+
+    if action == "trust_me":
+        sub = (params.get("mode") or params.get("state") or "status").lower().strip()
+        if sub in ("on", "enable", "true", "yes"):
+            _set_trust(True)
+            result = ("Trust mode on. I'll stop asking you for permission "
+                      "before touching your browser or camera. Destructive "
+                      "actions (closing your Chrome, submitting forms, "
+                      "shutting down) will still ask.")
+        elif sub in ("off", "disable", "false", "no"):
+            _set_trust(False)
+            result = "Trust mode off. I'll ask before accessing your browser or camera."
+        else:
+            result = f"Trust mode is {'ON' if _trust_me() else 'OFF'}."
+        _log(player, result)
+        return result
+
     if action == "attach_help":
         target = browser or _detect_default_browser()
         port   = int(params.get("port", _CDP_DEFAULT_PORT))
@@ -1249,6 +1564,48 @@ def browser_control(
     # These require a physically controllable browser; the automation window
     # only opens here, and as soon as it opens it goes to the user's last
     # navigated page — it doesn't sit on a blank page.
+    #
+    # On macOS, Chromium browsers ship an AppleScript dictionary that lets us
+    # read the active tab and run JS in it without CDP. For read/scroll/tab
+    # actions this is the ideal path: no relaunch, no isolated profile, works
+    # on the user's actual logged-in tab. Try that first; fall through only
+    # if it's unavailable or returns None.
+    _as_result = _try_applescript(browser, action, params)
+    if _as_result is not None:
+        _log(player, _as_result)
+        return _as_result
+
+    # If the user asked us to "scroll MY browser" and we silently launch a
+    # fresh Playwright window, the scroll goes to a window they can't see —
+    # exactly the "koronai" bug. Before any interactive action: if the user
+    # already has that browser running and we haven't attached yet, try CDP
+    # on the default port; if the port is closed, stop and tell the user how
+    # to open it rather than scrolling a ghost tab.
+    target_name = _ALIASES.get(
+        (browser or _registry._active_browser or _detect_default_browser())
+        .lower().strip(),
+        (browser or _registry._active_browser or _detect_default_browser()).lower().strip(),
+    )
+    if not _registry.has(target_name) and target_name in _detect_running_browsers():
+        endpoint = _cdp_probe(_CDP_DEFAULT_PORT)
+        if endpoint is not None:
+            try:
+                sess_pre = _registry.get(target_name, cdp_port=_CDP_DEFAULT_PORT)
+                sess_pre.run(sess_pre.get_url())
+                print(f"[Browser] 🔗 Auto-attached to running {target_name}")
+            except Exception as e:
+                print(f"[Browser] Auto-attach failed ({e}) — falling back to launch.")
+        else:
+            result = (
+                f"You already have {target_name} open, but I can't control it "
+                f"directly yet. Say 'relaunch {target_name} in control mode' "
+                f"(or call start_debug) and I'll close it and reopen it with "
+                f"your real profile so I can act on your actual tabs. Your "
+                f"logins and extensions stay intact."
+            )
+            _log(player, result)
+            return result
+
     try:
         sess = _registry.get(browser)
     except Exception as e:
@@ -1326,13 +1683,13 @@ def _log(player, text: str):
 # ── Tool declaration (auto-discovered by core/action_loader.py) ──────────────
 TOOL = {
     "name": "browser_control",
-    "description": "Controls any web browser. Use for: opening websites, searching the web, clicking elements, filling forms, scrolling, screenshots, navigation, any web-based task. Simple open/search requests launch the user's own browser normally (their real profile and logged-in accounts); interactive actions (click, type, fill_form...) attach an automation browser. Use 'attach' to connect to a browser the user has already started with --remote-debugging-port (defaults to 9222); use 'attach_help' to tell the user how to relaunch it. The first interactive action asks the user for permission on the HUD before anything touches their browser; fill_form also asks for confirmation before submitting. Use 'list_tabs' and 'switch_tab' to work with multiple tabs in the same browser. Always pass the 'browser' parameter when the user specifies a browser.",
+    "description": "Controls any web browser. Use for: opening websites, searching the web, clicking elements, filling forms, scrolling, screenshots, navigation, any web-based task. Simple open/search requests launch the user's own browser normally (their real profile and logged-in accounts); interactive actions (click, type, fill_form, scroll, get_text...) require JARVIS to be ATTACHED to that browser. Call 'list_browsers' to see what the user has open on their computer right now (never claim no browser is open based on anything else). If the user asks you to act on their REAL browser (scroll THEIR page, read THEIR tabs, check their logged-in account) and you're not attached, call 'start_debug' first — this quits their browser, reopens it with debug mode and their real profile, and auto-attaches. Only then will scroll/get_text/click act on their actual tabs. If start_debug is refused, degrade gracefully and explain. 'attach' connects to a browser the user already started with --remote-debugging-port=9222; 'attach_help' prints the manual command. fill_form asks for a second confirmation before submitting. 'list_tabs' and 'switch_tab' work across tabs in the attached browser. Always pass the 'browser' parameter when the user names one.",
     "parameters": {
         "type": "OBJECT",
         "properties": {
             "action": {
                 "type": "STRING",
-                "description": "go_to | search | click | type | scroll | fill_form | smart_click | smart_type | get_text | get_url | press | new_tab | close_tab | list_tabs | switch_tab | screenshot | back | forward | reload | attach | attach_help | switch | list_browsers | close | close_all"
+                "description": "go_to | search | click | type | scroll | fill_form | smart_click | smart_type | get_text | get_url | press | new_tab | close_tab | list_tabs | switch_tab | screenshot | back | forward | reload | attach | attach_help | start_debug | switch | list_browsers | close | close_all | trust_me"
             },
             "browser": {
                 "type": "STRING",
@@ -1397,6 +1754,10 @@ TOOL = {
             "title_contains": {
                 "type": "STRING",
                 "description": "Substring of tab title or URL for switch_tab"
+            },
+            "mode": {
+                "type": "STRING",
+                "description": "For trust_me action: on | off | status"
             }
         },
         "required": [

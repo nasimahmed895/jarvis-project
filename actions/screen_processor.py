@@ -181,3 +181,38 @@ def _capture_camera() -> tuple[bytes, str]:
 
     _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, _JPEG_Q])
     return buf.tobytes(), "image/jpeg"
+
+
+# ── Scene-change filter ──────────────────────────────────────────────────────
+# Streaming raw frames to Gemini Live at even 1 fps burns tokens on static
+# scenes (user walked away, screen idle). Compare the current frame to the
+# previous one via a 32-bin grayscale histogram; L1 distance >= threshold ⇒
+# "something changed enough to send". Numpy-only — no scikit-image / SSIM dep.
+def _frame_hist(img_bytes: bytes) -> "np.ndarray | None":
+    if not _PIL:
+        return None
+    try:
+        img = PIL.Image.open(io.BytesIO(img_bytes)).convert("L")
+        # Downsample so a shifted scene doesn't blow the histogram out — we
+        # want "is this basically the same picture", not pixel-perfect equality.
+        img.thumbnail((256, 256), PIL.Image.BILINEAR)
+        arr = np.asarray(img, dtype=np.uint8)
+        hist, _ = np.histogram(arr, bins=32, range=(0, 256))
+        s = hist.sum()
+        return (hist / s) if s else hist.astype(np.float32)
+    except Exception:
+        return None
+
+
+def frame_changed(prev: "np.ndarray | None",
+                   curr: "np.ndarray | None",
+                   threshold: float = 0.12) -> bool:
+    """True when the two normalized histograms differ by more than
+    `threshold` (L1 distance). First call (prev=None) always True so the
+    opening frame is sent."""
+    if prev is None or curr is None:
+        return True
+    try:
+        return bool(float(np.abs(prev - curr).sum()) >= threshold)
+    except Exception:
+        return True
