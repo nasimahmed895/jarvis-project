@@ -1338,8 +1338,16 @@ class JarvisLive:
         args = dict(fc.args or {})
 
         print(f"[JARVIS] 🔧 {name}  {args}")
-        agent_journal.write("voice_tool_call", tool=name, args=args)
-        self.ui.set_state("THINKING")
+        try:
+            agent_journal.write("voice_tool_call", tool=name, args=args)
+        except Exception:
+            # Journal failures are diagnostic; the tool-call cycle must proceed
+            # even if the journal is unwritable (disk full, path clobbered).
+            pass
+        try:
+            self.ui.set_state("THINKING")
+        except Exception:
+            pass
 
 
         if name == "save_memory":
@@ -1662,16 +1670,31 @@ class JarvisLive:
                     result = f"Unknown tool: {name}"
 
         except Exception as e:
-            result = f"Tool '{name}' failed: {e}"
+            # Keep the error INSIDE the FunctionResponse the server is waiting
+            # on; do NOT fire a parallel send_client_content via speak_error —
+            # that interleaves a client turn with an in-flight tool-call cycle
+            # and some server builds close the socket with a 1007. The model
+            # reads this result and can decide what to say next.
+            result = f"Tool '{name}' failed: {type(e).__name__}: {e}"
             traceback.print_exc()
-            self.speak_error(name, e)
+            try:
+                self.ui.write_log(f"ERR: {name} — {str(e)[:120]}")
+            except Exception:
+                pass
 
-        if not self.ui.muted:
-            self.ui.set_state("LISTENING")
+        try:
+            if not self.ui.muted:
+                self.ui.set_state("LISTENING")
+        except Exception:
+            pass
 
         print(f"[JARVIS] 📤 {name} → {str(result)[:80]}")
-        agent_journal.write("voice_tool_result",
-                            tool=name, result=str(result)[:600])
+        try:
+            agent_journal.write("voice_tool_result",
+                                tool=name, result=str(result)[:600])
+        except Exception:
+            # Journaling is diagnostic, never worth killing a tool-call cycle.
+            pass
 
         # A tool that declared itself NON_BLOCKING also says when its answer may
         # re-enter the conversation. Without this the model finishes whatever it
@@ -1679,8 +1702,11 @@ class JarvisLive:
         # something like a phone call already ringing, is exactly the noise the
         # non-blocking call was meant to avoid. Tools that declared nothing get
         # the API default and behave as they always have.
-        _sched = (self._action_registry.scheduling(name)
-                  or self._plugin_registry.scheduling(name))
+        try:
+            _sched = (self._action_registry.scheduling(name)
+                      or self._plugin_registry.scheduling(name))
+        except Exception:
+            _sched = None
         _extra = {"scheduling": _sched} if _sched else {}
         return types.FunctionResponse(
             id=fc.id, name=name,
@@ -1696,12 +1722,31 @@ class JarvisLive:
             # mic / phone PCM through the new `audio` field instead. Queue items
             # are {"data": <bytes>, "mime_type": <str>} from _listen_audio and
             # the phone relay.
-            await self.session.send_realtime_input(
-                audio=types.Blob(
-                    data=msg["data"],
-                    mime_type=msg.get("mime_type", "audio/pcm"),
+            try:
+                await self.session.send_realtime_input(
+                    audio=types.Blob(
+                        data=msg["data"],
+                        mime_type=msg.get("mime_type", "audio/pcm"),
+                    )
                 )
-            )
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                # One bad chunk must not take the mic loop down — and
+                # losing the loop silently is one of the "stops talking"
+                # shapes. If the socket has gone away, the recv loop will
+                # observe it on the next server frame and trigger the
+                # normal reconnect path; here we just drop this chunk and
+                # keep the loop alive so queued audio can resume.
+                err_name = type(e).__name__
+                low = str(e).lower()
+                if any(tok in low for tok in ("close", "websocket",
+                                               "reset", "disconnect",
+                                               "eof", "1007", "1011")):
+                    print(f"[JARVIS] ⚠ send_realtime socket gone ({err_name}); "
+                          "dropping chunk, awaiting reconnect")
+                else:
+                    print(f"[JARVIS] ⚠ send_realtime failed ({err_name}): {e}")
 
     async def _listen_audio(self):
         print("[JARVIS] 🎤 Mic started")
@@ -1769,10 +1814,19 @@ class JarvisLive:
             
             if not self.ui.muted and not self._phone_active:
                 data = indata.tobytes()
-                loop.call_soon_threadsafe(
-                    self.out_queue.put_nowait,
-                    {"data": data, "mime_type": "audio/pcm"}
-                )
+                # QueueFull can happen if _send_realtime stalls (slow network,
+                # mid-reconnect). Dropping the newest mic chunk is far better
+                # than letting an unhandled exception climb out of the audio
+                # callback and silently kill the stream — THAT shows up to the
+                # user as "JARVIS stopped hearing me". Fire-and-forget put.
+                def _enqueue(d=data):
+                    try:
+                        self.out_queue.put_nowait(
+                            {"data": d, "mime_type": "audio/pcm"}
+                        )
+                    except Exception:
+                        pass
+                loop.call_soon_threadsafe(_enqueue)
                 # Feed the live mic level to the HUD so the waveform reacts to
                 # the user's actual voice while listening. Purely cosmetic — any
                 # failure here must never disturb the mic.
@@ -1893,13 +1947,22 @@ class JarvisLive:
         # label *means* is explained once, in the generated [SELF] block.
         src = ("[IMAGE SOURCE: WEBCAM]" if angle == "camera"
                else "[IMAGE SOURCE: SCREEN CAPTURE]")
-        await self.session.send_client_content(
-            turns={"role": "user", "parts": [
-                {"inline_data": {"mime_type": mime_t, "data": b64}},
-                {"text": f"{src}\n\n{question}"},
-            ]},
-            turn_complete=True,
-        )
+        try:
+            await self.session.send_client_content(
+                turns={"role": "user", "parts": [
+                    {"inline_data": {"mime_type": mime_t, "data": b64}},
+                    {"text": f"{src}\n\n{question}"},
+                ]},
+                turn_complete=True,
+            )
+        except Exception as e:
+            # If we leave the busy flag stuck, every future vision request is
+            # refused. Clear it on failure so the next call can try again.
+            print(f"[Vision] inject failed: {type(e).__name__}: {e}")
+            self._vision_busy          = False
+            self._vision_cam_active    = False
+            self._vision_close_pending = False
+            return False
 
         if self._vision_cam_active:
             # Camera: stay busy until JARVIS has finished speaking the answer,
@@ -2132,12 +2195,55 @@ class JarvisLive:
                         fn_responses = []
                         for fc in response.tool_call.function_calls:
                             print(f"[JARVIS] 📞 {fc.name}")
-                            fr = await self._execute_tool(fc)
+                            try:
+                                fr = await self._execute_tool(fc)
+                            except Exception as _tool_err:
+                                # A tool must NEVER kill the receive loop.
+                                # The server is waiting for a function_response
+                                # for this id — hand it an error payload so the
+                                # turn can close instead of hanging.
+                                print(f"[JARVIS] ⚠ tool {fc.name} crashed outside "
+                                      f"handler: {_tool_err}")
+                                traceback.print_exc()
+                                try:
+                                    self.ui.write_log(
+                                        f"ERR: {fc.name} crashed — {str(_tool_err)[:120]}"
+                                    )
+                                except Exception:
+                                    pass
+                                fr = types.FunctionResponse(
+                                    id=fc.id, name=fc.name,
+                                    response={"result":
+                                              f"Tool '{fc.name}' crashed: "
+                                              f"{type(_tool_err).__name__}: "
+                                              f"{str(_tool_err)[:200]}"},
+                                )
                             fn_responses.append(fr)
-                        await self.session.send_tool_response(
-                            function_responses=fn_responses
-                        )
-                        await self._flush_pending_vision()
+                        try:
+                            await self.session.send_tool_response(
+                                function_responses=fn_responses
+                            )
+                        except Exception as _send_err:
+                            # Server has already walked away, or the socket is
+                            # half-closed. Force a reconnect so the next turn
+                            # starts on a healthy session instead of silently
+                            # waiting for a response the server will never send.
+                            print(f"[JARVIS] ❌ send_tool_response failed: "
+                                  f"{_send_err}")
+                            self.ui.write_log(
+                                "SYS: Tool response send failed — reconnecting."
+                            )
+                            raise _ReconnectSignal(keep_context=True)
+                        try:
+                            await self._flush_pending_vision()
+                        except Exception as _flush_err:
+                            # A broken vision inject must never deadlock the
+                            # session. Clear the pending state so future vision
+                            # calls aren't blocked by a stuck sentinel.
+                            print(f"[JARVIS] ⚠ flush_pending_vision: {_flush_err}")
+                            self._pending_vision = None
+                            self._vision_busy = False
+                            self._vision_close_pending = False
 
                     if getattr(response, "go_away", None) is not None:
                         tl = getattr(response.go_away, "time_left", "?")
@@ -2681,13 +2787,27 @@ class JarvisLive:
                     self.out_queue        = asyncio.Queue(maxsize=200)
                     self._turn_done_event = asyncio.Event()
 
-                    # Reset transient state that must not carry over from a previous session
+                    # Reset transient state that must not carry over from a previous session.
+                    # Any of these left stuck was a "stops talking" culprit: _vision_busy
+                    # holds vision calls hostage, _interrupted makes recv discard audio,
+                    # _tail_until suppresses the mic, _is_speaking blocks a new turn.
                     self._pending_vision       = None
                     self._vision_cam_active    = False
                     self._vision_close_pending = False
                     self._vision_busy          = False
                     self._vision_last_time     = 0.0
                     self._interrupted          = False
+                    self._tail_until           = 0.0
+                    self._play_cursor          = 0.0
+                    self._out_level            = 0.0
+                    self._last_out_logged      = ""
+                    self._last_user_speech     = time.monotonic()
+                    with self._speaking_lock:
+                        self._is_speaking = False
+                    try:
+                        self._visemes.reset()
+                    except Exception:
+                        pass
                     # Cancel any vision stream bound to the dead session —
                     # its send_realtime_input calls would target a closed
                     # websocket. User can resume with vision_stream start.
