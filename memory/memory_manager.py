@@ -14,6 +14,10 @@ def get_base_dir() -> Path:
 
 BASE_DIR         = get_base_dir()
 MEMORY_PATH      = BASE_DIR / "memory" / "long_term.json"
+# Written next to long_term.json during the first encrypted save. Kept for a
+# conservative TTL so a keychain lockout doesn't cost the user their memory —
+# worst case they can copy it back to long_term.json by hand.
+BACKUP_PATH      = BASE_DIR / "memory" / "long_term.plaintext.bak"
 _lock            = Lock()
 MAX_VALUE_LENGTH = 380
 
@@ -40,6 +44,12 @@ MAX_VALUE_LENGTH = 380
 MEMORY_MAX_CHARS  = 200_000
 PROMPT_CORE_CHARS = 900
 PROMPT_INDEX_CHARS = 420
+# Budget for the lessons block injected into every prompt. Closes the reflection
+# feedback loop: the daily reflection pass wrote `learned/<date>` entries but
+# nothing ever read them back — lessons were orphaned. 500 chars holds roughly
+# the 6-10 most recent bullets without dominating the system prompt.
+PROMPT_LESSONS_CHARS = 500
+PROMPT_LESSONS_MAX   = 10
 # Most entries any one category may contribute to the core block, so a person
 # with forty stored preferences still gets their sister into the prompt.
 PROMPT_MAX_PER_CATEGORY = 6
@@ -52,14 +62,49 @@ def _empty_memory() -> dict:
         "relationships": {},
         "wishes":        {},
         "notes":         {},
+        "learned":       {},
     }
+
+def _decode_memory_bytes(blob: bytes) -> dict | None:
+    """Try encrypted-format first, then plaintext JSON. Returns None on both
+    failing so the caller can fall back to the plaintext backup."""
+    try:
+        from core import secrets as _secrets  # lazy: avoids cycles at import time
+        if _secrets.is_encrypted(blob):
+            plain = _secrets.decrypt_bytes(blob)
+            if plain is None:
+                return None
+            data = json.loads(plain.decode("utf-8"))
+            return data if isinstance(data, dict) else None
+    except Exception as e:
+        print(f"[Memory] ⚠️ encrypted decode failed: {e}")
+        return None
+    try:
+        data = json.loads(blob.decode("utf-8"))
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
 
 def load_memory() -> dict:
     if not MEMORY_PATH.exists():
         return _empty_memory()
     with _lock:
         try:
-            data = json.loads(MEMORY_PATH.read_text(encoding="utf-8"))
+            blob = MEMORY_PATH.read_bytes()
+            data = _decode_memory_bytes(blob)
+            if data is None and BACKUP_PATH.exists():
+                # Encrypted store is unreadable (keychain lockout, moved
+                # machine, wrong user). The plaintext backup kept from the
+                # migration moment is a lifeline — read it and let the next
+                # save re-encrypt under the current key.
+                try:
+                    data = json.loads(
+                        BACKUP_PATH.read_text(encoding="utf-8")
+                    )
+                    print("[Memory] ⚠️ encrypted load failed — restored from plaintext backup")
+                except Exception:
+                    data = None
             if isinstance(data, dict):
                 base = _empty_memory()
                 for key in base:
@@ -93,13 +138,69 @@ def set_trim_notifier(fn) -> None:
     _trim_notifier = fn
 
 
+# Importance weights for trim scoring. Higher = harder to forget. Identity is
+# given an outsized weight because losing someone's name is a trust-breaker —
+# the trim loop also refuses to drop identity entries unless nothing else
+# remains, which rarely happens before the 200 KB runaway guard trips. Learned
+# lessons sit above notes because the reflection pass already filtered them.
+_CATEGORY_WEIGHT = {
+    "identity":      5.0,
+    "relationships": 3.0,
+    "projects":      3.0,
+    "preferences":   2.0,
+    "wishes":        2.0,
+    "learned":       2.0,
+    "notes":         1.0,
+    "sessions":      0.5,
+}
+
+# Recency half-life in days: a 30-day-old entry is worth half a same-day one,
+# a 60-day-old a quarter, and so on. This is why a fresh "notes" entry can
+# outrank a stale "preferences" one — both freshness and category matter.
+_RECENCY_HALFLIFE_DAYS = 30.0
+
+
+def _days_ago(updated: str) -> float:
+    if not updated:
+        return 999.0
+    try:
+        d = datetime.strptime(updated, "%Y-%m-%d")
+    except Exception:
+        return 999.0
+    delta = datetime.now() - d
+    return max(0.0, delta.days + delta.seconds / 86400.0)
+
+
+def _trim_score(cat: str, entry: dict) -> float:
+    """Higher score = more important = less likely to be dropped.
+
+    Pure chronological trim was flagged by the audit: it would drop a
+    permanent fact like 'sister_name' before a transient 'notes' entry that
+    happened to be newer. Scoring blends category weight with recency so the
+    categories that actually matter in conversation are protected."""
+    updated = entry.get("updated", "") if isinstance(entry, dict) else ""
+    days = _days_ago(updated)
+    recency = 1.0 / (1.0 + days / _RECENCY_HALFLIFE_DAYS)
+    weight = _CATEGORY_WEIGHT.get(cat, 1.0)
+    return weight * recency
+
+
 def _trim_to_limit(memory: dict) -> dict:
     if len(json.dumps(memory, ensure_ascii=False)) <= MEMORY_MAX_CHARS:
         return memory
     entries = _all_entries(memory)
-    entries.sort(key=lambda t: t[2].get("updated", "0000-00-00"))
-    dropped = []
-    for cat, key, _ in entries:
+    # Two-pass drop: non-identity entries first (ascending by score, so the
+    # cheapest ones leave), identity only if the runaway guard is still tripped
+    # afterwards. A memory that has filled with 200 KB of bugged writes should
+    # not drop the user's name before the garbage it is being drowned in.
+    non_identity = [t for t in entries if t[0] != "identity"]
+    non_identity.sort(key=lambda t: _trim_score(t[0], t[2]))
+    identity = [t for t in entries if t[0] == "identity"]
+    identity.sort(key=lambda t: _trim_score(t[0], t[2]))
+    ordered = non_identity + identity
+
+    dropped: list[str] = []
+    for cat, key, _ in ordered:
         if len(json.dumps(memory, ensure_ascii=False)) <= MEMORY_MAX_CHARS:
             break
         del memory[cat][key]
@@ -108,7 +209,7 @@ def _trim_to_limit(memory: dict) -> dict:
     if dropped and _trim_notifier:
         try:
             _trim_notifier(
-                f"SYS: Memory full — forgot {len(dropped)} oldest entries "
+                f"SYS: Memory full — forgot {len(dropped)} lowest-value entries "
                 f"({', '.join(dropped[:3])}{'…' if len(dropped) > 3 else ''})"
             )
         except Exception:
@@ -120,11 +221,38 @@ def save_memory(memory: dict) -> None:
         return
     memory = _trim_to_limit(memory)
     MEMORY_PATH.parent.mkdir(parents=True, exist_ok=True)
+    plaintext = json.dumps(memory, indent=2, ensure_ascii=False).encode("utf-8")
+    ciphertext: bytes | None = None
+    try:
+        from core import secrets as _secrets
+        if _secrets.encryption_available():
+            ciphertext = _secrets.encrypt_bytes(plaintext)
+    except Exception as e:
+        print(f"[Memory] ⚠️ encryption check failed: {e}")
+        ciphertext = None
     with _lock:
-        MEMORY_PATH.write_text(
-            json.dumps(memory, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
+        if ciphertext is not None:
+            # First time we write encrypted output: preserve a plaintext snapshot
+            # so a keychain lockout is recoverable. Subsequent saves overwrite
+            # just the ciphertext file — we are NOT fanning out plaintext on
+            # every save.
+            if not BACKUP_PATH.exists() and MEMORY_PATH.exists():
+                try:
+                    existing = MEMORY_PATH.read_bytes()
+                    # Only snapshot genuinely plaintext input, never an older
+                    # ciphertext (would double-encrypt the recovery path).
+                    try:
+                        from core import secrets as _s2
+                        is_enc = _s2.is_encrypted(existing)
+                    except Exception:
+                        is_enc = existing.startswith(b"@fernet:")
+                    if not is_enc:
+                        BACKUP_PATH.write_bytes(existing)
+                except Exception as e:
+                    print(f"[Memory] ⚠️ backup snapshot failed: {e}")
+            MEMORY_PATH.write_bytes(ciphertext)
+        else:
+            MEMORY_PATH.write_bytes(plaintext)
 
 
 def _truncate_value(val: str) -> str:
@@ -189,6 +317,41 @@ _CATEGORY_LABELS = {
 
 _IDENTITY_FIELDS = ["name", "age", "birthday", "city", "job",
                     "language", "school", "nationality"]
+
+
+def _collect_lessons(memory: dict | None) -> list[str]:
+    """Flatten memory['learned'] into a newest-first list of lesson bullets.
+
+    Each daily entry stores multiple lessons joined with '•' bullets (see
+    core/reflection._write_lessons). We split them back out and keep insertion
+    order within a day, with newer days first.
+    """
+    if not memory:
+        return []
+    learned = memory.get("learned") or {}
+    if not isinstance(learned, dict) or not learned:
+        return []
+    # Sort days newest first. Days are ISO dates, so lexicographic == chronological.
+    days = sorted(learned.keys(), reverse=True)
+    out: list[str] = []
+    for day in days:
+        entry = learned[day]
+        if not isinstance(entry, dict):
+            continue
+        value = str(entry.get("value", "") or "").strip()
+        if not value:
+            continue
+        for line in value.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith("•"):
+                line = line[1:].strip()
+            if line:
+                out.append(line)
+        if len(out) >= PROMPT_LESSONS_MAX * 2:
+            break
+    return out
 
 
 def format_memory_for_prompt(memory: dict | None) -> str:
@@ -321,6 +484,29 @@ def format_memory_for_prompt(memory: dict | None) -> str:
                        + (f" (+{len(indexed) - len(names)} more)"
                           if len(indexed) > len(names) else ""))
 
+    # 4. Lessons distilled by the daily reflection pass — things that went
+    # wrong, things that worked, user corrections. Previously these were
+    # written to disk but never read; this block closes the feedback loop.
+    lessons = _collect_lessons(memory)
+    if lessons:
+        budget   = PROMPT_LESSONS_CHARS
+        kept: list[str] = []
+        for ls in lessons:
+            if len(kept) >= PROMPT_LESSONS_MAX:
+                break
+            line = f"• {ls}"
+            if budget - len(line) - 1 < 0:
+                break
+            kept.append(line)
+            budget -= len(line) + 1
+        if kept:
+            out.append("")
+            out.append(
+                "[LESSONS FROM PAST SESSIONS — apply these quietly; do not "
+                "recite them. Newest first]"
+            )
+            out.extend(kept)
+
     return "\n".join(out) + "\n"
 
 
@@ -445,12 +631,10 @@ def save_session_summary(summary: str, language: str = "") -> None:
         entry["language"] = language
     sessions.append(entry)
     memory["sessions"] = sessions[-_SESSION_MAX:]
-    with _lock:
-        MEMORY_PATH.parent.mkdir(parents=True, exist_ok=True)
-        MEMORY_PATH.write_text(
-            json.dumps(memory, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
+    # Reuse save_memory so this path gets encryption, trimming, and the
+    # backup snapshot for free. Previously this wrote raw JSON straight to
+    # disk and would have shipped plaintext even on encrypted deployments.
+    save_memory(memory)
     print(f"[Memory] 📝 Session saved ({entry['date']}): {summary[:60]}…")
 
 
@@ -459,21 +643,17 @@ def pop_last_session() -> dict | None:
     Return AND remove the most recent session entry.
     Calling this consumes the entry so it is never repeated in future briefings.
     """
-    with _lock:
-        if not MEMORY_PATH.exists():
+    if not MEMORY_PATH.exists():
+        return None
+    try:
+        memory   = load_memory()
+        sessions = memory.get("sessions", [])
+        if not isinstance(sessions, list) or not sessions:
             return None
-        try:
-            memory   = json.loads(MEMORY_PATH.read_text(encoding="utf-8"))
-            sessions = memory.get("sessions", [])
-            if not isinstance(sessions, list) or not sessions:
-                return None
-            entry = sessions.pop()          # remove the last entry
-            memory["sessions"] = sessions
-            MEMORY_PATH.write_text(
-                json.dumps(memory, indent=2, ensure_ascii=False),
-                encoding="utf-8",
-            )
-            return entry
-        except Exception as e:
-            print(f"[Memory] ⚠️ pop_last_session error: {e}")
-            return None
+        entry = sessions.pop()          # remove the last entry
+        memory["sessions"] = sessions
+        save_memory(memory)
+        return entry
+    except Exception as e:
+        print(f"[Memory] ⚠️ pop_last_session error: {e}")
+        return None

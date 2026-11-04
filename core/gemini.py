@@ -296,16 +296,26 @@ def _cooling(model: str) -> bool:
 
 
 def api_key(refresh: bool = False) -> str:
-    """The Gemini key from config/api_keys.json. Cached; never raises."""
+    """The Gemini key: OS keychain first, then config/api_keys.json. Cached;
+    never raises. Falling back to the JSON preserves every existing install —
+    the keychain path is opt-in via core.secrets.set_api_key."""
     global _cached_key
     with _key_lock:
         if _cached_key is not None and not refresh:
             return _cached_key
+        key = ""
         try:
-            data = json.loads(_KEY_FILE.read_text(encoding="utf-8"))
-            _cached_key = str(data.get("gemini_api_key") or "")
+            from core import secrets as _secrets
+            key = _secrets.get_api_key("gemini_api_key") or ""
         except Exception:
-            _cached_key = ""
+            key = ""
+        if not key:
+            try:
+                data = json.loads(_KEY_FILE.read_text(encoding="utf-8"))
+                key = str(data.get("gemini_api_key") or "")
+            except Exception:
+                key = ""
+        _cached_key = key
         return _cached_key
 
 

@@ -54,6 +54,13 @@ cryptography>=42,<50
 python-multipart>=0.0.9,<1
 qrcode[pil]>=7,<9
 
+# ── Secrets at rest ───────────────────────────────────────────────────────────
+# Optional but strongly recommended: moves the Gemini API key and the symmetric
+# key for memory encryption into the OS keychain (macOS Keychain / Windows
+# Credential Manager / Linux SecretService). When absent, core/secrets.py falls
+# back to a 0600 key file under config/, which is still better than plaintext.
+keyring>=24,<26
+
 # ── Plugin extras ─────────────────────────────────────────────────────────────
 # Plugins are downloaded one file at a time from the community, so their
 # dependencies are installed UP FRONT: dropping a .py into plugins/ should make

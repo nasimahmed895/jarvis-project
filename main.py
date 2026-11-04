@@ -78,6 +78,13 @@ from core.plugin_loader        import discover_plugins
 from core                      import undo as undo_stack
 from core                      import confirm as confirm_gate
 from core                      import audio_devices
+from core                      import tasks as agent_tasks
+from core                      import planner as agent_planner
+from core                      import journal as agent_journal
+from core                      import reflection as agent_reflection
+from core                      import vectors as agent_vectors
+from core.mcp_client            import MCPRegistry
+from core.worker               import TaskWorker
 from core.action_loader        import discover_actions
 from core.echo                 import EchoGuard
 from core.viseme               import VisemeStream
@@ -469,6 +476,32 @@ TOOL_DECLARATIONS = [
         }
     },
     {
+        "name": "semantic_recall",
+        "description": (
+            "Semantic (meaning-based) search across indexed snippets — memory writes, "
+            "journal digests, past tasks. Use this when the user asks a vague question "
+            "about something they said or did before whose exact wording you don't "
+            "remember: 'what have I been working on this week?', 'anything about Python?', "
+            "'what did we talk about yesterday regarding React?'. Works where "
+            "recall_memory fails because it matches meaning, not substrings. "
+            "Returns ranked hits with their source and a relevance score."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "query": {
+                    "type": "STRING",
+                    "description": "Natural-language question or topic.",
+                },
+                "top_k": {
+                    "type": "INTEGER",
+                    "description": "Max results (default 5, cap 20).",
+                },
+            },
+            "required": ["query"],
+        },
+    },
+    {
         "name": "recall_memory",
         "description": (
             "Look up a fact you have stored about the user but which is NOT in "
@@ -494,6 +527,42 @@ TOOL_DECLARATIONS = [
                 },
             },
             "required": [],
+        },
+    },
+    {
+        "name": "agent",
+        "description": (
+            "Plan and run a multi-step goal in the background. Use this when the user asks "
+            "for something that needs several tool calls in sequence — researching across "
+            "sites, booking a flight, filling and submitting a form, drafting and saving a "
+            "document, comparing options. The planner breaks the goal into concrete tool "
+            "steps, the worker runs them while the conversation continues, and the user "
+            "hears progress as steps finish. "
+            "Actions: 'plan' with goal=<natural-language task> starts a new task and returns "
+            "its id + step count; 'status' with id=<n> returns the current step list; "
+            "'list' returns the last few tasks; 'cancel' with id=<n> stops a running task; "
+            "'result' with id=<n> returns the final merged output once done. "
+            "DO NOT call agent for things that are one tool call. DO NOT call agent to "
+            "answer a factual question you already know. The agent is for executing work, "
+            "not for thinking."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "action": {
+                    "type": "STRING",
+                    "description": "plan | status | list | cancel | result",
+                },
+                "goal": {
+                    "type": "STRING",
+                    "description": "Natural-language description of the task, for action='plan'.",
+                },
+                "id": {
+                    "type": "INTEGER",
+                    "description": "Task id, for action='status' | 'cancel' | 'result'.",
+                },
+            },
+            "required": ["action"],
         },
     },
     {
@@ -672,6 +741,37 @@ class JarvisLive:
         self.ui.get_plugin_settings = self._plugin_registry.settings_schemas  # ⚙ settings tab
         self.ui.request_say = self.plugin_say   # plugins: mid-task speech channel
 
+        # ── Agent worker (background multi-step tasks) ───────────────────────
+        # SQLite-backed task store + worker that drains ready steps. The
+        # worker shares the session's event loop via a TaskGroup child, so
+        # it dies cleanly with the session and crash-recovers on restart
+        # (any step left `running` from a prior process is reset to planned
+        # by TaskWorker._rehydrate).
+        agent_tasks.connect(BASE_DIR / "memory" / "tasks.sqlite")
+        agent_journal.connect(BASE_DIR / "memory" / "journal")
+        agent_reflection.connect(BASE_DIR / "memory" / "reflection_state.json")
+        agent_vectors.connect(BASE_DIR / "memory" / "vectors.sqlite")
+        # ── MCP servers (optional) ───────────────────────────────────────
+        # Launched off-thread so a slow npx install doesn't block startup.
+        # Any server failure is non-fatal: the tools simply don't appear.
+        self._mcp = MCPRegistry(
+            logger=lambda m: print(m),
+            notify=lambda m: self.ui.write_log(m),
+        )
+        threading.Thread(
+            target=self._mcp.load_from_config,
+            args=(BASE_DIR / "config" / "mcp_servers.json",),
+            daemon=True, name="mcp-boot",
+        ).start()
+        # Reflection runs off-thread so startup is never blocked by a model
+        # call. `run_if_due` is idempotent — no-ops when the 20h cooldown
+        # has not expired.
+        threading.Thread(
+            target=agent_reflection.run_if_due,
+            daemon=True, name="reflection",
+        ).start()
+        self._worker: TaskWorker | None = None
+
         # ── Wake word ────────────────────────────────────────────────────────
         # _awake gates the mic (see _listen_audio) and the background speakers.
         # It is True whenever wake word is OFF, so default behaviour is unchanged.
@@ -783,6 +883,78 @@ class JarvisLive:
         # what they are waiting to see.
         return wake_install(logger=lambda m: print(f"[Wake] {m}"),
                             notify=lambda m: self.ui.write_log(f"SYS: {m}"))
+
+    # Tools the agent worker is NOT allowed to touch (live-session-only tools
+    # that would race with the voice loop or terminate the app). Kept here so
+    # both `agent plan` and the replanner read the same list.
+    _WORKER_FORBIDDEN = {
+        "agent", "screen_process", "vision_stream", "close_camera",
+        "manage_monitor", "shutdown_jarvis",
+    }
+
+    def _all_declarations(self) -> list[dict]:
+        """Live tool catalogue for the planner/replanner, filtered to what
+        the worker can actually execute (forbidden tools stripped)."""
+        decls = (TOOL_DECLARATIONS
+                 + self._action_registry.get_tool_declarations()
+                 + self._plugin_registry.get_tool_declarations()
+                 + self._mcp.get_tool_declarations())
+        return [
+            d for d in decls
+            if (d.get("name") if isinstance(d, dict)
+                else getattr(d, "name", "")) not in self._WORKER_FORBIDDEN
+        ]
+
+    async def _agent_dispatch(self, tool: str, args: dict) -> str:
+        """Run a tool on behalf of the agent worker.
+
+        Priority: registered file-backed actions → plugins → a short-list of
+        inline tools we can safely invoke without a live session (system_status,
+        recall_memory, undo, save_memory). Anything that needs the Gemini
+        session itself (screen_process, vision_stream, close_camera,
+        manage_monitor, shutdown_jarvis, agent) is refused — the worker runs
+        orthogonally to the voice turn, and letting it steer the model from
+        the outside is a footgun the planner should not reach for.
+        """
+        loop = asyncio.get_event_loop()
+        if tool.startswith("mcp__") and self._mcp.has(tool):
+            return await loop.run_in_executor(
+                None,
+                lambda: self._mcp.call(tool, dict(args or {})),
+            ) or "Done."
+        if self._action_registry.has(tool):
+            ctx = {"player": self.ui, "speak": self.speak,
+                   "response": None, "session_memory": None}
+            return await loop.run_in_executor(
+                None,
+                lambda: self._action_registry.run(tool, dict(args or {}), ctx),
+            ) or "Done."
+        if self._plugin_registry.has(tool):
+            return await loop.run_in_executor(
+                None,
+                lambda: self._plugin_registry.run(
+                    tool, dict(args or {}),
+                    player=self.ui, session_memory=None,
+                ),
+            ) or "Done."
+        if tool == "system_status":
+            return str(await loop.run_in_executor(None, get_system_status))
+        if tool == "recall_memory":
+            return str(search_memory(args.get("query", ""), limit=8))
+        if tool == "save_memory":
+            cat = args.get("category", "notes")
+            key = args.get("key", "")
+            val = args.get("value", "")
+            if key and val:
+                update_memory({cat: {key: {"value": val}}})
+                return f"saved {cat}/{key}"
+            return "nothing to save"
+        if tool == "undo":
+            if str(args.get("action", "")).lower().strip() == "list":
+                items = undo_stack.history()
+                return "\n".join(items) if items else "nothing to undo"
+            return await loop.run_in_executor(None, undo_stack.undo_last)
+        raise RuntimeError(f"agent cannot dispatch tool {tool!r}")
 
     def plugin_say(self, instruction: str) -> None:
         """
@@ -1042,7 +1214,8 @@ class JarvisLive:
         # and this follows without anyone editing a prompt.
         _all_decls = (TOOL_DECLARATIONS
                       + self._action_registry.get_tool_declarations()
-                      + self._plugin_registry.get_tool_declarations())
+                      + self._plugin_registry.get_tool_declarations()
+                      + self._mcp.get_tool_declarations())
         _names = {(d.get("name") if isinstance(d, dict) else getattr(d, "name", ""))
                   for d in _all_decls}
         sys_prompt = _render_prompt(sys_prompt, {
@@ -1163,6 +1336,7 @@ class JarvisLive:
         args = dict(fc.args or {})
 
         print(f"[JARVIS] 🔧 {name}  {args}")
+        agent_journal.write("voice_tool_call", tool=name, args=args)
         self.ui.set_state("THINKING")
 
 
@@ -1173,6 +1347,14 @@ class JarvisLive:
             if key and value:
                 update_memory({category: {key: {"value": value}}})
                 print(f"[Memory] 💾 save_memory: {category}/{key} = {value}")
+                # Index for semantic recall. Off-thread so the Live loop
+                # never waits on the embedding API.
+                threading.Thread(
+                    target=agent_vectors.add,
+                    args=("memory", f"{category}/{key}: {value}"),
+                    kwargs={"source_id": f"{category}/{key}"},
+                    daemon=True, name="vec-index",
+                ).start()
             if not self.ui.muted:
                 self.ui.set_state("LISTENING")
             return types.FunctionResponse(
@@ -1184,7 +1366,33 @@ class JarvisLive:
         result = "Done."
 
         try:
-            if name == "recall_memory":
+            if name == "semantic_recall":
+                query = str(args.get("query", "")).strip()
+                try:
+                    top_k = int(args.get("top_k") or 5)
+                except (TypeError, ValueError):
+                    top_k = 5
+                top_k = max(1, min(20, top_k))
+                if not query:
+                    result = "semantic_recall: provide a query."
+                else:
+                    hits = await loop.run_in_executor(
+                        None,
+                        lambda: agent_vectors.search(query, top_k=top_k),
+                    )
+                    if not hits:
+                        result = (f"No semantic matches for {query!r}. "
+                                  f"Nothing indexed yet, or no overlap.")
+                    else:
+                        lines = [f"Top {len(hits)} semantic hits for {query!r}:"]
+                        for h in hits:
+                            lines.append(
+                                f"  [{h['source']}/{h.get('source_id') or h['id']}] "
+                                f"({h['kind']} {h['score']:.2f}) "
+                                f"{(h.get('text') or '')[:200]}"
+                            )
+                        result = "\n".join(lines)
+            elif name == "recall_memory":
                 # Local file search: no network, no second model. Kept out of
                 # the executor deliberately — it is a dictionary scan over a few
                 # hundred short strings, and a thread hop would cost more than
@@ -1311,6 +1519,96 @@ class JarvisLive:
                 else:
                     result = "Specify action (add/remove/list) and a topic."
 
+            elif name == "agent":
+                sub = str(args.get("action", "")).lower().strip()
+                if sub == "plan":
+                    goal = (args.get("goal") or "").strip()
+                    if not goal:
+                        result = "Agent plan: provide a 'goal' string."
+                    else:
+                        try:
+                            decls = (TOOL_DECLARATIONS
+                                     + self._action_registry.get_tool_declarations()
+                                     + self._plugin_registry.get_tool_declarations()
+                                     + self._mcp.get_tool_declarations())
+                            # Drop tools the worker cannot safely run.
+                            _SKIP = {"agent", "screen_process", "vision_stream",
+                                     "close_camera", "manage_monitor",
+                                     "shutdown_jarvis"}
+                            decls = [d for d in decls
+                                     if (d.get("name") if isinstance(d, dict)
+                                         else getattr(d, "name", "")) not in _SKIP]
+                            steps = await loop.run_in_executor(
+                                None,
+                                lambda: agent_planner.plan_goal(
+                                    goal, decls, log=lambda m: print(m)),
+                            )
+                            task_id = agent_planner.commit_plan(goal, steps)
+                            result = (f"Planned task #{task_id} with "
+                                      f"{len(steps)} step(s). Worker will "
+                                      f"announce each one as it finishes.")
+                            self.ui.write_log(
+                                f"SYS: 📋 Task #{task_id} planned "
+                                f"({len(steps)} step(s))."
+                            )
+                        except agent_planner.PlanError as pe:
+                            result = f"Agent plan failed: {pe}"
+                        except Exception as pe:
+                            result = f"Agent plan error: {pe}"
+                elif sub == "list":
+                    rows = agent_tasks.list_tasks(limit=10)
+                    if not rows:
+                        result = "No tasks recorded yet."
+                    else:
+                        result = "\n".join(
+                            agent_tasks.task_summary(r["id"]) for r in rows
+                        )
+                elif sub == "status":
+                    tid = int(args.get("id", 0))
+                    if not tid:
+                        result = "Provide 'id' for status."
+                    else:
+                        t = agent_tasks.get_task(tid)
+                        if not t:
+                            result = f"Task #{tid}: not found."
+                        else:
+                            steps = agent_tasks.task_steps(tid)
+                            lines = [f"Task #{tid} {t['status']}: {t['goal'][:120]}"]
+                            for s in steps:
+                                mark = {"done": "✓", "failed": "✗",
+                                        "running": "…", "cancelled": "⊘"}.get(
+                                    s["status"], "·")
+                                lines.append(
+                                    f"  {mark} [{s['status']}] {s['verb']} "
+                                    f"({s['tool']})"
+                                )
+                            result = "\n".join(lines)
+                elif sub == "cancel":
+                    tid = int(args.get("id", 0))
+                    if not tid:
+                        result = "Provide 'id' for cancel."
+                    else:
+                        agent_tasks.cancel_task(tid)
+                        result = f"Task #{tid} cancelled."
+                elif sub == "result":
+                    tid = int(args.get("id", 0))
+                    if not tid:
+                        result = "Provide 'id' for result."
+                    else:
+                        t = agent_tasks.get_task(tid)
+                        if not t:
+                            result = f"Task #{tid}: not found."
+                        else:
+                            steps = agent_tasks.task_steps(tid)
+                            tail = "\n".join(
+                                f"- {s['verb']}: {(s['result'] or s['error'] or '')[:200]}"
+                                for s in steps
+                            )
+                            result = (f"Task #{tid} {t['status']}:\n{tail}")
+                else:
+                    result = ("Agent action must be plan | status | list | "
+                              "cancel | result.")
+
             elif name == "shutdown_jarvis":
                 self.ui.write_log("SYS: Shutdown requested.")
                 async def _do_shutdown():
@@ -1345,6 +1643,12 @@ class JarvisLive:
                     _label = f"{_mode.upper()} — {_query[:38]}" if _query else _mode.upper()
                     self.ui.show_content(_label, r)
 
+            elif name.startswith("mcp__") and self._mcp.has(name):
+                r = await loop.run_in_executor(
+                    None,
+                    lambda: self._mcp.call(name, args),
+                )
+                result = r or "Done."
             else:
                 if self._plugin_registry.has(name):
                     r = await loop.run_in_executor(
@@ -1364,6 +1668,8 @@ class JarvisLive:
             self.ui.set_state("LISTENING")
 
         print(f"[JARVIS] 📤 {name} → {str(result)[:80]}")
+        agent_journal.write("voice_tool_result",
+                            tool=name, result=str(result)[:600])
 
         # A tool that declared itself NON_BLOCKING also says when its answer may
         # re-enter the conversation. Without this the model finishes whatever it
@@ -2412,6 +2718,13 @@ class JarvisLive:
                         await self._dashboard.broadcast({"type": "status", "state": "active"})
 
                     self._reconnect_event.clear()  # ignore requests from before this session
+                    # Agent worker: lives for the session, dies with the TaskGroup
+                    self._worker = TaskWorker(
+                        dispatch=self._agent_dispatch,
+                        notify=self.ui.write_log,
+                        declarations=self._all_declarations,
+                    )
+                    tg.create_task(self._worker.run())
                     tg.create_task(self._watch_reconnect())
                     tg.create_task(self._send_realtime())
                     tg.create_task(self._listen_audio())
@@ -2423,6 +2736,38 @@ class JarvisLive:
                     tg.create_task(self._run_sleep_watch())
                     if self._dashboard:
                         tg.create_task(self._relay_phone_audio())
+
+                    # Unfinished tasks from a previous process: tell the model
+                    # once per session so it can greet the user with real
+                    # continuity ("last night's task #7 was halfway through —
+                    # continue?"). The worker also auto-rehydrates `running`
+                    # steps to `planned` on its first tick, so saying yes is
+                    # enough for them to resume.
+                    _pending = agent_tasks.list_tasks(
+                        status=["planned", "running", "awaiting_user"], limit=5)
+                    if _pending and not self._briefing_sent:
+                        _lines = [
+                            f"#{t['id']} {t['status']}: {t['goal'][:80]}"
+                            for t in _pending
+                        ]
+                        _body = "\n".join(_lines)
+                        tg.create_task(self.session.send_client_content(
+                            turns={
+                                "role": "user",
+                                "parts": [{"text":
+                                    "[INTERNAL — do not read out verbatim] "
+                                    "On startup, the agent worker found these "
+                                    "unfinished tasks from a previous session:\n"
+                                    f"{_body}\n\n"
+                                    "Greet the user briefly in their language "
+                                    "and ask whether to continue or cancel "
+                                    "them. Use agent(action='status', id=<n>) "
+                                    "to inspect and agent(action='cancel', "
+                                    "id=<n>) to drop."
+                                }],
+                            },
+                            turn_complete=True,
+                        ))
 
                     # Morning briefing — fires once per process launch (if enabled).
                     # Skipped in wake-word mode: it comes up asleep, and a briefing

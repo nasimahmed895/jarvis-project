@@ -56,6 +56,62 @@ def _set_trust(flag: bool) -> None:
     _save_config_key(_TRUST_CFG_KEY, bool(flag))
 
 
+# ── Scoped per-site trust ────────────────────────────────────────────────────
+# A binary `trust_me` is a heavy hammer. Users sometimes want to say "it's
+# fine to fill forms on rootdevs.com and my-company.com, but keep asking
+# elsewhere". These helpers maintain a small allowlist of hostnames that
+# skip the confirmation gate.
+_SCOPED_TRUST_KEY = "browser_scoped_trust"
+
+
+def _scoped_trust_hosts() -> set[str]:
+    try:
+        from actions.screen_processor import _load_config
+        raw = _load_config().get(_SCOPED_TRUST_KEY, []) or []
+        return {str(h).lower().strip() for h in raw if h}
+    except Exception:
+        return set()
+
+
+def _save_scoped_trust(hosts: set[str]) -> None:
+    try:
+        from actions.screen_processor import _save_config_key
+        _save_config_key(_SCOPED_TRUST_KEY, sorted(hosts))
+    except Exception:
+        pass
+
+
+def _host_from_url(url: str | None) -> str:
+    if not url:
+        return ""
+    try:
+        from urllib.parse import urlparse
+        return (urlparse(url).hostname or "").lower()
+    except Exception:
+        return ""
+
+
+def _is_scoped_trusted() -> bool:
+    """True when the current browser's active URL host is on the allowlist."""
+    try:
+        from actions import _mac_chrome as _mc
+        if not _mc.available() or not _mc.is_running("chrome"):
+            return False
+        host = _host_from_url(_mc.active_url("chrome"))
+    except Exception:
+        return False
+    if not host:
+        return False
+    hosts = _scoped_trust_hosts()
+    if host in hosts:
+        return True
+    # Match "*.rootdevs.com" patterns too
+    for h in hosts:
+        if h.startswith("*.") and host.endswith(h[1:]):
+            return True
+    return False
+
+
 # ── User preferences for browser automation ─────────────────────────────────
 # Common form values (name, email, phone, company, website, address) saved
 # once and auto-filled whenever a form has matching fields. Lives next to the
@@ -1409,7 +1465,7 @@ def _gate_sensitive(action: str, parameters: dict,
     into inputs, the user still clicks Send), so trust_me=True is explicit
     permission to do that without a confirmation each time. A separate 'submit'
     action would gate on its own if we ever add one."""
-    if _trust_me():
+    if _trust_me() or _is_scoped_trusted():
         return run()
     if _confirm is None or not _confirm.is_bound():
         return run()
@@ -1750,6 +1806,44 @@ def browser_control(
         _log(player, result)
         return result
 
+    if action == "trust_site":
+        host = (params.get("host") or "").lower().strip()
+        if not host:
+            # Use current browser's active URL host.
+            try:
+                from actions import _mac_chrome as _mc
+                host = _host_from_url(_mc.active_url("chrome")).lower()
+            except Exception:
+                host = ""
+        if not host:
+            result = "Specify 'host' (e.g. rootdevs.com or *.example.com)."
+        else:
+            hs = _scoped_trust_hosts()
+            hs.add(host)
+            _save_scoped_trust(hs)
+            result = f"Trusted {host} — form fills won't ask for confirmation there."
+        _log(player, result)
+        return result
+
+    if action == "untrust_site":
+        host = (params.get("host") or "").lower().strip()
+        hs = _scoped_trust_hosts()
+        if host in hs:
+            hs.discard(host)
+            _save_scoped_trust(hs)
+            result = f"Removed {host} from trusted sites."
+        else:
+            result = f"{host or '(empty)'} is not on the trust list."
+        _log(player, result)
+        return result
+
+    if action == "list_trusted_sites":
+        hs = _scoped_trust_hosts()
+        result = ("Trusted sites: " + ", ".join(sorted(hs))) if hs \
+            else "No sites are currently trusted."
+        _log(player, result)
+        return result
+
     if action == "set_pref":
         key = (params.get("key") or "").strip()
         val = params.get("value", "")
@@ -1981,7 +2075,7 @@ TOOL = {
         "properties": {
             "action": {
                 "type": "STRING",
-                "description": "go_to | search | click | coord_click | hover | type | scroll | fill_form | smart_click | smart_type | get_text | get_url | get_state | press | new_tab | close_tab | reopen_tab | next_tab | prev_tab | list_tabs | switch_tab | screenshot | back | forward | reload | keystroke | shortcut | focus_address | find | find_close | enable_js | set_pref | get_prefs | clear_prefs | attach | attach_help | start_debug | switch | list_browsers | close | close_all | trust_me"
+                "description": "go_to | search | click | coord_click | hover | type | scroll | fill_form | smart_click | smart_type | get_text | get_url | get_state | press | new_tab | close_tab | reopen_tab | next_tab | prev_tab | list_tabs | switch_tab | screenshot | back | forward | reload | keystroke | shortcut | focus_address | find | find_close | enable_js | set_pref | get_prefs | clear_prefs | trust_site | untrust_site | list_trusted_sites | attach | attach_help | start_debug | switch | list_browsers | close | close_all | trust_me"
             },
             "browser": {
                 "type": "STRING",
@@ -2062,6 +2156,10 @@ TOOL = {
             "use_prefs": {
                 "type": "BOOLEAN",
                 "description": "For fill_form: auto-merge saved preferences (default true). Set false for one-off forms."
+            },
+            "host": {
+                "type": "STRING",
+                "description": "Hostname for trust_site / untrust_site, e.g. 'rootdevs.com' or '*.example.com'. Omit to use the current active tab's host."
             }
         },
         "required": [

@@ -18,10 +18,21 @@ config/whatsapp_web/
 *credentials*.json
 .env
 .env.*
+# Symmetric key for memory encryption-at-rest (core/secrets.py local fallback
+# when the OS keychain isn't reachable). Publishing this key defeats the
+# entire feature — never commit it.
+config/.memory_key
 
 # ── Personal data the assistant accumulates about you ─────────────────────────
 memory/long_term.json
 memory/*.db
+# One-shot plaintext snapshot kept so a keychain lockout is recoverable.
+memory/long_term.plaintext.bak
+# SQLite stores that hold private user data (CRM, finance, projects,
+# commitments, tasks, vectors). Schema lives in core/*.py; data is the user's.
+memory/*.sqlite
+memory/*.sqlite-wal
+memory/*.sqlite-shm
 
 # ── Python build noise ────────────────────────────────────────────────────────
 __pycache__/
