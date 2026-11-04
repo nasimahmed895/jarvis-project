@@ -60,7 +60,7 @@ ultimate AI Personal Executive Assistant described in the roadmap.
 |---|---|
 | CI workflow | `.github/workflows/test.yml`, `requirements-ci.txt` |
 
-### P5 — multimodal + emotional intelligence (new)
+### P5 — multimodal + emotional intelligence
 | Module | Path |
 |---|---|
 | Emotion engine + tone adapter | `core/emotion.py`, `actions/emotion_adapt.py` |
@@ -68,6 +68,14 @@ ultimate AI Personal Executive Assistant described in the roadmap.
 | Multimodal context buffer | `core/context_buffer.py`, `actions/context_recall.py` |
 | Browser flow w/ CAPTCHA pause/resume | `actions/browser_flow.py` |
 | Financial sandbox adapter | `core/payments.py`, `actions/payment.py` |
+
+### P6 — real-world grounding + integration (this checkpoint)
+| Module | Path |
+|---|---|
+| Grounded knowledge aggregator (time / location / weather / fact-check) | `core/grounded.py`, `actions/grounded.py` |
+| Emotion auto-detect on every user turn | `main.py` (receive loop hook + proactive gate) |
+| CAPTCHA pause → UI + dashboard notification + wait_for_human | `actions/browser_flow.py` |
+| Payment idempotency + recipient verification | `core/payments.py`, `actions/payment.py` |
 
 ---
 
@@ -126,10 +134,12 @@ mirrors confirmed amounts into ``finance.add_expense``.
 | Perception         | 13        |
 | Context buffer     | 10        |
 | Browser flow       | 19        |
-| Payments           | 17        |
-| **New total**      | **236**   |
+| Payments           | 28        |
+| Grounded knowledge | 18        |
+| Browser flow       | 21        |
+| **New total**      | **267**   |
 | Plus existing user tests + integration | 238 |
-| **Grand total**    | **474 (all green)** |
+| **Grand total**    | **505 (all green)** |
 
 ---
 

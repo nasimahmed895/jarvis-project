@@ -712,6 +712,11 @@ class JarvisLive:
         self._proactive        = ProactiveEngine()
         self._last_user_speech = time.monotonic()  # updated on every user utterance
         self._session_log: list[str] = []          # conversation turns for end-of-session summary
+        # Most recent emotional reading from the user's last utterance — set by
+        # the receive loop so the proactive engine and tone-sensitive branches
+        # can read it without re-running the detector. None until the first
+        # user turn completes.
+        self._last_emotion: dict | None = None
 
         self._enhanced_live = True  # proactive audio; auto-disabled if the server rejects it
         self._tuned_live    = True  # turn-taking / media / thinking knobs; same fallback
@@ -2161,6 +2166,30 @@ class JarvisLive:
                                         "text": full_in,
                                         "ts": datetime.now().isoformat(),
                                     }))
+                                # ── Emotion read on every user turn ─────────
+                                # Offline pattern match; microseconds. Records
+                                # into the multimodal context buffer so the
+                                # model can look back at how the user felt
+                                # three turns ago, and sets _last_emotion for
+                                # the proactive loop (don't interrupt a
+                                # stressed user with a trivia prompt).
+                                try:
+                                    from core import emotion as _em
+                                    from core import context_buffer as _cb
+                                    reading = _em.detect(full_in)
+                                    self._last_emotion = reading.to_dict()
+                                    if reading.primary != "neutral":
+                                        _cb.record(
+                                            "emotion:user",
+                                            (f"{reading.primary} "
+                                             f"(conf {reading.confidence:.2f}, "
+                                             f"tone→{reading.suggested_tone})"),
+                                            meta={"primary": reading.primary,
+                                                  "confidence": reading.confidence,
+                                                  "tone": reading.suggested_tone},
+                                        )
+                                except Exception as _em_err:
+                                    print(f"[JARVIS] ⚠ emotion read: {_em_err}")
                             in_buf = []
 
                             full_out = " ".join(out_buf).strip()
@@ -2638,6 +2667,21 @@ class JarvisLive:
                 continue
 
             if not self._proactive.should_trigger(self._last_user_speech):
+                continue
+
+            # Respect the user's current emotional state: if their last
+            # utterance read as stressed, sad, or frustrated at reasonable
+            # confidence, skip the proactive prompt. An interruption with
+            # "fun fact: did you know…" when someone is overwhelmed is the
+            # opposite of helpful.
+            last = self._last_emotion or {}
+            sensitive = ("stress", "sadness", "frustration")
+            if (last.get("primary") in sensitive
+                    and float(last.get("confidence", 0.0)) >= 0.4):
+                print(f"[Proactive] Skipped — user reads as "
+                      f"{last['primary']} ({last['confidence']:.2f})")
+                # Don't mark_triggered either, so the cooldown stays fresh
+                # for when they're ready for conversation again.
                 continue
 
             self._proactive.mark_triggered()

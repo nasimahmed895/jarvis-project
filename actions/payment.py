@@ -99,12 +99,30 @@ def payment(
                 payee=p.get("payee") or None,
                 provider=str(p.get("provider") or "local"),
                 metadata={"category": p.get("category")} if p.get("category") else None,
+                idempotency_key=p.get("idempotency_key") or None,
             )
         except _pay.PaymentSecurityError as e:
             return f"payment prepare: REFUSED — {e}"
         except ValueError as e:
             return f"payment prepare: {e}"
         return f"Prepared intent — {_fmt_intent(intent)}"
+
+    if action == "verify_recipient":
+        iid = _int(p.get("id"))
+        if iid is None:
+            return "payment verify_recipient: provide numeric 'id'."
+        check = _pay.verify_recipient(
+            iid,
+            expected_amount=_num(p.get("expected_amount")),
+            expected_currency=p.get("expected_currency") or None,
+            expected_payee=p.get("expected_payee") or None,
+            expected_purpose=p.get("expected_purpose") or None,
+        )
+        if check["ok"]:
+            intent = check.get("intent") or {}
+            return ("OK — fields match.\n" + _fmt_intent(intent))
+        return ("MISMATCH — do NOT confirm:\n  "
+                + "\n  ".join(check["mismatches"]))
 
     if action == "confirm":
         iid = _int(p.get("id"))
@@ -116,7 +134,13 @@ def payment(
                     "proof string (e.g. 'user' once the HUD confirm "
                     "has fired). Never auto-confirm.")
         try:
-            intent = _pay.confirm_intent(iid, confirmed_by=confirmed_by)
+            intent = _pay.confirm_intent(
+                iid, confirmed_by=confirmed_by,
+                expected_amount=_num(p.get("expected_amount")),
+                expected_currency=p.get("expected_currency") or None,
+                expected_payee=p.get("expected_payee") or None,
+                expected_purpose=p.get("expected_purpose") or None,
+            )
         except LookupError as e:
             return f"payment confirm: {e}"
         except _pay.PaymentSecurityError as e:
@@ -178,7 +202,7 @@ TOOL = {
         "type": "OBJECT",
         "properties": {
             "action":       {"type": "STRING",
-                             "description": "prepare | confirm | verify | list | cancel | history"},
+                             "description": "prepare | verify_recipient | confirm | verify | list | cancel | history"},
             "id":           {"type": "INTEGER", "description": "Intent id."},
             "amount":       {"type": "NUMBER",  "description": "Amount to pay (must be > 0)."},
             "currency":     {"type": "STRING",  "description": "ISO currency code."},
@@ -188,6 +212,11 @@ TOOL = {
             "category":     {"type": "STRING",  "description": "Expense category (for finance mirror)."},
             "confirmed_by": {"type": "STRING",  "description": "Explicit confirmation proof (e.g. 'user')."},
             "status":       {"type": "STRING",  "description": "Filter for 'list' (prepared | confirmed | succeeded | failed | cancelled | all)."},
+            "idempotency_key": {"type": "STRING",  "description": "Optional; passing the same key returns the same intent instead of creating a duplicate."},
+            "expected_amount":   {"type": "NUMBER", "description": "For 'verify_recipient'/'confirm': amount the user just spoke, compared to the stored intent."},
+            "expected_currency": {"type": "STRING", "description": "For 'verify_recipient'/'confirm': currency the user just spoke."},
+            "expected_payee":    {"type": "STRING", "description": "For 'verify_recipient'/'confirm': payee the user just spoke."},
+            "expected_purpose":  {"type": "STRING", "description": "For 'verify_recipient'/'confirm': purpose the user just spoke (substring match against description)."},
         },
         "required": ["action"],
     },

@@ -69,6 +69,7 @@ jobs:
               "actions.emotion_adapt", "actions.vision_analyze",
               "actions.context_recall", "actions.browser_flow",
               "actions.payment",
+              "core.grounded", "actions.grounded",
           ]
           for m in mods:
               importlib.import_module(m)

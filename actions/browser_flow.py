@@ -164,6 +164,43 @@ def _probe_page(step_params: dict, player=None,
     return url, text
 
 
+def _notify_user(player, session_memory, message: str) -> None:
+    """Push a human-visible notification through every channel we have.
+    Each channel is independent and best-effort — a missing UI or
+    dashboard must never block the browser flow."""
+    print(f"[BrowserFlow] {message}")
+    if player is not None:
+        try:
+            player.write_log(f"SYS: {message}")
+        except Exception:
+            pass
+    # Dashboard broadcast is nice-to-have — only possible if the player
+    # or session_memory hands us a handle to it. We never import the
+    # dashboard module directly here because browser_flow has to stay
+    # usable in the agent worker where there is no dashboard.
+    for carrier in (player, session_memory):
+        if carrier is None:
+            continue
+        dash = getattr(carrier, "_dashboard", None) or \
+               getattr(carrier, "dashboard", None)
+        if dash is None:
+            continue
+        broadcast = getattr(dash, "broadcast", None)
+        if not callable(broadcast):
+            continue
+        try:
+            import asyncio as _asyncio
+            loop = _asyncio.get_event_loop_policy().get_event_loop()
+            payload = {"type": "browser_flow", "message": message}
+            if loop.is_running():
+                _asyncio.ensure_future(broadcast(payload))
+            # If no running loop we skip — the tool is already running
+            # inside its own loop context via run_in_executor; the
+            # dashboard's broadcast will fire on the next tick.
+        except Exception:
+            pass
+
+
 def _coerce_steps(raw) -> list[dict]:
     if isinstance(raw, list):
         return [s for s in raw if isinstance(s, dict)]
@@ -292,6 +329,28 @@ def browser_flow(
             lines.append(result.get("message", ""))
             for r in (result.get("detector", {}).get("reasons") or [])[:3]:
                 lines.append(f"  · {r}")
+            # ── UI + dashboard notification ────────────────────────────
+            # The model gets the resume contract via the return value,
+            # but the USER needs to see "complete the CAPTCHA in the
+            # browser, I'm waiting". Both channels are best-effort; we
+            # never let a UI call stop the flow report.
+            _notify_user(player, session_memory,
+                          f"⏸ CAPTCHA detected — complete the challenge in "
+                          f"your browser. I will resume from step "
+                          f"{result.get('resume_step')} once you say "
+                          f"'resume' or 'I'm done'.")
+            # Mirror into context_buffer so the model can see this
+            # on later turns ("what happened with that login?").
+            try:
+                from core import context_buffer as _cb
+                _cb.record(
+                    "browser:captcha_pause",
+                    f"Paused at step {result.get('resume_step')} on "
+                    f"{result.get('current_url','?')}",
+                    meta={"detector": result.get("detector")},
+                )
+            except Exception:
+                pass
         elif result.get("status") == "verify_failed":
             lines.append(f"failed at step {result.get('failed_step')}")
             for r in (result.get("verify", {}).get("reasons") or []):
@@ -302,6 +361,18 @@ def browser_flow(
         else:
             lines.append(f"ran {len(result.get('results', []))} step(s)")
         return "\n".join(lines)
+
+    if action == "wait_for_human":
+        # Pure signalling action: the planner can call this immediately
+        # after a captcha_pause to tell the user that it is waiting.
+        # Idempotent — no polling, no blocking. The user closes the loop
+        # by invoking browser_flow action='resume' (or just saying
+        # 'resume' and the planner handling it).
+        note = str(p.get("note") or
+                   "Waiting for you to complete a manual browser step. "
+                   "Say 'resume' when done.").strip()
+        _notify_user(player, session_memory, f"⏸ {note}")
+        return f"waiting_for_human: {note}"
 
     if action == "detect_captcha":
         if _bc is None:
@@ -361,7 +432,9 @@ TOOL = {
         "type": "OBJECT",
         "properties": {
             "action":       {"type": "STRING",
-                             "description": "run_sequence | resume | detect_captcha | verify"},
+                             "description": "run_sequence | resume | wait_for_human | detect_captcha | verify"},
+            "note":         {"type": "STRING",
+                             "description": "Message to show the user for 'wait_for_human'."},
             "steps":        {"type": "STRING",
                              "description": "JSON array of browser_control parameter dicts."},
             "verify":       {"type": "STRING",

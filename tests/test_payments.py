@@ -185,6 +185,121 @@ def test_action_list_rejects_unknown():
     assert "unknown action" in pay_action.payment({"action": "warp"})
 
 
+# ── Idempotency (P6.4) ──────────────────────────────────────────────────────
+
+def test_explicit_idempotency_key_dedupes():
+    _fresh()
+    a = pay.prepare(10, idempotency_key="order-42")
+    b = pay.prepare(10, idempotency_key="order-42")
+    assert a["id"] == b["id"]
+    assert len(pay.list_intents()) == 1
+
+
+def test_different_keys_create_separate_intents():
+    _fresh()
+    a = pay.prepare(10, idempotency_key="order-1")
+    b = pay.prepare(10, idempotency_key="order-2")
+    assert a["id"] != b["id"]
+
+
+def test_auto_derived_key_dedupes_rapid_repeat():
+    _fresh()
+    a = pay.prepare(15, payee="Cafe", description="lunch")
+    b = pay.prepare(15, payee="Cafe", description="lunch")
+    assert a["id"] == b["id"], ("auto-derived key should dedupe "
+                                 "identical rapid repeats")
+
+
+def test_auto_derived_key_discriminates_different_payees():
+    _fresh()
+    a = pay.prepare(15, payee="Cafe", description="lunch")
+    b = pay.prepare(15, payee="Store", description="lunch")
+    assert a["id"] != b["id"]
+
+
+# ── verify_recipient (P6.4) ─────────────────────────────────────────────────
+
+def test_verify_recipient_matches():
+    _fresh()
+    intent = pay.prepare(42.0, currency="USD", payee="Cafe",
+                          description="lunch tab")
+    r = pay.verify_recipient(
+        intent["id"],
+        expected_amount=42.0,
+        expected_currency="USD",
+        expected_payee="cafe",
+        expected_purpose="lunch",
+    )
+    assert r["ok"] is True
+    assert r["mismatches"] == []
+
+
+def test_verify_recipient_amount_mismatch():
+    _fresh()
+    intent = pay.prepare(42.0, payee="Cafe", description="lunch")
+    r = pay.verify_recipient(intent["id"], expected_amount=50.0)
+    assert r["ok"] is False
+    assert any("amount" in m for m in r["mismatches"])
+
+
+def test_verify_recipient_payee_mismatch():
+    _fresh()
+    intent = pay.prepare(10, payee="Alice")
+    r = pay.verify_recipient(intent["id"], expected_payee="Bob")
+    assert r["ok"] is False
+
+
+def test_verify_recipient_missing_intent():
+    _fresh()
+    r = pay.verify_recipient(9999, expected_amount=1)
+    assert r["ok"] is False
+    assert "not found" in r["mismatches"][0]
+
+
+def test_confirm_refuses_mismatch():
+    _fresh()
+    intent = pay.prepare(10, payee="Alice", description="dinner")
+    with mock.patch("core.finance.add_expense"):
+        try:
+            pay.confirm_intent(
+                intent["id"],
+                confirmed_by="user",
+                expected_amount=100,   # wrong!
+            )
+        except pay.PaymentSecurityError as e:
+            assert "mismatch" in str(e).lower()
+            return
+    raise AssertionError("expected PaymentSecurityError on amount mismatch")
+
+
+def test_confirm_proceeds_when_all_match():
+    _fresh()
+    intent = pay.prepare(10, currency="USD", payee="Alice",
+                          description="dinner")
+    with mock.patch("core.finance.add_expense"):
+        out = pay.confirm_intent(
+            intent["id"],
+            confirmed_by="user",
+            expected_amount=10,
+            expected_currency="usd",
+            expected_payee="Alice",
+            expected_purpose="dinner",
+        )
+    assert out["status"] == "confirmed"
+
+
+def test_action_verify_recipient_reports_mismatch():
+    _fresh()
+    intent = pay.prepare(10, payee="Alice")
+    out = pay_action.payment({
+        "action": "verify_recipient",
+        "id": intent["id"],
+        "expected_amount": 99,
+    })
+    assert "MISMATCH" in out
+    assert "amount" in out
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0

@@ -209,6 +209,37 @@ def test_action_run_sequence_pauses_on_captcha():
     assert "status=captcha_pause" in out
 
 
+def test_action_pause_notifies_user_via_player():
+    class _FakePlayer:
+        def __init__(self):
+            self.logs: list[str] = []
+        def write_log(self, msg):
+            self.logs.append(msg)
+
+    player = _FakePlayer()
+    steps = json.dumps([{"action": "go_to", "url": "https://x.com"}])
+    with mock.patch.object(bf, "_run_browser_step", side_effect=_fake_run), \
+         mock.patch.object(bf, "_probe_page", side_effect=_probe_captcha):
+        bf.browser_flow({"action": "run_sequence", "steps": steps},
+                         player=player)
+    assert any("CAPTCHA detected" in l for l in player.logs), player.logs
+
+
+def test_action_wait_for_human_notifies():
+    class _FakePlayer:
+        def __init__(self):
+            self.logs: list[str] = []
+        def write_log(self, msg):
+            self.logs.append(msg)
+
+    player = _FakePlayer()
+    out = bf.browser_flow({"action": "wait_for_human",
+                            "note": "finish the login"},
+                           player=player)
+    assert "waiting_for_human" in out
+    assert any("finish the login" in l for l in player.logs)
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0
