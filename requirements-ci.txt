@@ -1,0 +1,11 @@
+# ── CI-only dependency subset ────────────────────────────────────────────────
+# requirements.txt carries the full desktop runtime (PyQt6, sounddevice,
+# mss, opencv…) which costs hundreds of megabytes and only matters on the
+# user's own machine. CI exists to catch regressions in the business-logic
+# layer, not to render a QPainter avatar. Everything the test suite actually
+# imports (apart from the stdlib) lives here.
+pytest>=7,<9
+cryptography>=42,<50
+keyring>=24,<26
+requests>=2.31,<3
+google-genai>=2.8.0,<3

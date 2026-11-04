@@ -26,6 +26,8 @@ config/.memory_key
 # ── Personal data the assistant accumulates about you ─────────────────────────
 memory/long_term.json
 memory/*.db
+# Short-lived Gemini Live resumption handle (12h TTL by default).
+memory/session_handle.json
 # One-shot plaintext snapshot kept so a keychain lockout is recoverable.
 memory/long_term.plaintext.bak
 # SQLite stores that hold private user data (CRM, finance, projects,

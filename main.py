@@ -83,6 +83,7 @@ from core                      import planner as agent_planner
 from core                      import journal as agent_journal
 from core                      import reflection as agent_reflection
 from core                      import vectors as agent_vectors
+from core                      import session_store as agent_session
 from core.mcp_client            import MCPRegistry
 from core.worker               import TaskWorker
 from core.action_loader        import discover_actions
@@ -696,13 +697,14 @@ class JarvisLive:
         # switching microphone — started an empty session. "Unlimited sessions"
         # leaked through exactly this hole.
         #
-        # Deliberately in RAM only, never written to disk. Persisting it would
-        # make a fresh launch continue yesterday's conversation, which sounds
-        # appealing but breaks the session-summary flow: _save_session_summary
-        # runs at shutdown and the morning briefing pops it the next day. A
-        # conversation that never ends never produces a summary, and the
-        # "yesterday we talked about…" line silently disappears.
-        self._resume_handle: str | None = None
+        # Persisted with a short TTL (12h default) via core/session_store.
+        # A same-day restart (closed lid in the morning, reopened at lunch)
+        # continues the thread; a week-later restart does not — the stale
+        # file is deleted automatically, and the session-summary flow fires
+        # as before on the natural day boundary.
+        self._resume_handle: str | None = agent_session.load_handle()
+        if self._resume_handle:
+            print("[JARVIS] 🔗 Loaded persisted session handle (TTL-fresh)")
         self._turn_done_event: asyncio.Event | None = None
         self._dashboard     = None
         self._briefing_sent    = False          # morning briefing fires once per process
@@ -2031,6 +2033,7 @@ class JarvisLive:
                             if self._resume_handle is None:
                                 print("[JARVIS] 🔗 Session resumption armed")
                             self._resume_handle = _sru.new_handle
+                            agent_session.save_handle(self._resume_handle)
 
                     if response.data:
                         if self._interrupted:
@@ -2794,6 +2797,7 @@ class JarvisLive:
                         # A deliberate clean slate (voice change) — drop the
                         # handle so the next connect really does start empty.
                         self._resume_handle = None
+                        agent_session.clear_handle()
                     self._conn_backoff = 0
                     continue
 
@@ -2812,6 +2816,7 @@ class JarvisLive:
                     print("[JARVIS] 🔗 Resumption handle rejected — starting a fresh session")
                     self.ui.write_log("SYS: Could not restore the conversation — starting fresh.")
                     self._resume_handle = None
+                    agent_session.clear_handle()
                     self._conn_backoff = 0
                     continue
 
