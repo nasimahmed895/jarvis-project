@@ -237,6 +237,17 @@ _OS_LAUNCHERS = {
     "Linux":   _launch_linux,
 }
 
+_URL_RE = __import__("re").compile(
+    r"^(?:https?://|www\.)|^[a-z0-9][-a-z0-9]*\.(?:com|net|org|io|app|ai|co|dev|xyz|me|info|biz|us|uk|in|bd|edu|gov|tv|site|shop)(?:/|$)",
+    __import__("re").IGNORECASE,
+)
+
+
+def _looks_like_url(s: str) -> bool:
+    s = (s or "").strip()
+    return bool(s) and bool(_URL_RE.search(s))
+
+
 def open_app(
     parameters=None,
     response=None,
@@ -247,6 +258,20 @@ def open_app(
 
     if not app_name:
         return "No application name provided."
+
+    # Websites belong to browser_control.go_to — launching them through `open`
+    # starts an un-attached browser window the model can't then click/scroll.
+    # Re-route internally so a stray open_app("rootdevs.com") still lands in a
+    # controllable session.
+    if _looks_like_url(app_name):
+        try:
+            from actions.browser_control import browser_control as _bc
+            url = app_name if "://" in app_name else f"https://{app_name.lstrip('/')}"
+            return _bc(parameters={"action": "go_to", "url": url},
+                       response=response, player=player,
+                       session_memory=session_memory)
+        except Exception as e:
+            print(f"[open_app] URL route failed ({e}) — falling through to native open.")
 
     launcher = _OS_LAUNCHERS.get(_SYSTEM)
     if launcher is None:
@@ -276,7 +301,7 @@ def open_app(
 # ── Tool declaration (auto-discovered by core/action_loader.py) ──────────────
 TOOL = {
     "name": "open_app",
-    "description": "Opens any application on the computer. Use this whenever the user asks to open, launch, or start any app, website, or program. Always call this tool — never just say you opened it.",
+    "description": "Opens a desktop application on the computer (WhatsApp, Spotify, Terminal, VS Code, Figma, Calculator, etc.). Use this ONLY for native apps, NEVER for websites or URLs. When the user asks you to open a website, domain, or anything ending in .com/.org/.net/etc., call browser_control with action='go_to' instead — otherwise the page opens in an un-attached browser window and every follow-up click/scroll/read fails. Always call this tool — never just say you opened it.",
     "parameters": {
         "type": "OBJECT",
         "properties": {

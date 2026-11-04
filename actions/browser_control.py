@@ -54,6 +54,87 @@ def _trust_me() -> bool:
 def _set_trust(flag: bool) -> None:
     from actions.screen_processor import _save_config_key
     _save_config_key(_TRUST_CFG_KEY, bool(flag))
+
+
+# ── User preferences for browser automation ─────────────────────────────────
+# Common form values (name, email, phone, company, website, address) saved
+# once and auto-filled whenever a form has matching fields. Lives next to the
+# other config under config/api_keys.json so `trust_me` and prefs share one
+# home.
+_PREFS_KEY = "browser_prefs"
+
+
+def _load_prefs() -> dict:
+    try:
+        from actions.screen_processor import _load_config
+        return dict(_load_config().get(_PREFS_KEY, {}) or {})
+    except Exception:
+        return {}
+
+
+def _save_prefs(prefs: dict) -> None:
+    try:
+        from actions.screen_processor import _save_config_key
+        _save_config_key(_PREFS_KEY, dict(prefs or {}))
+    except Exception:
+        pass
+
+
+def _merge_prefs_into_fields(fields: dict) -> dict:
+    """Autocomplete a fill_form request with whatever the user has saved.
+    Explicit values in `fields` always win."""
+    out = dict(fields or {})
+    prefs = _load_prefs()
+    for k, v in prefs.items():
+        # Only fill keys the model didn't supply, and only non-empty prefs.
+        if k not in out and v:
+            out[k] = v
+    return out
+
+
+def _js_str(s: str) -> str:
+    """Safely serialise a Python string into a JS string literal."""
+    import json as _j
+    return _j.dumps(str(s))
+
+
+_REACT_RECT_JS = ""  # placeholder — rect computation is inline, kept for future
+
+
+def _os_pointer(x: int, y: int, click: bool) -> str:
+    """Move the OS pointer to (x,y) in screen space and optionally left-click.
+    Uses `cliclick` when it's on PATH (precise, pass-through), otherwise falls
+    back to AppleScript System Events (which can click but not move the real
+    cursor on modern macOS)."""
+    cli = shutil.which("cliclick")
+    if cli:
+        if click:
+            cmd = [cli, f"c:{x},{y}"]
+        else:
+            cmd = [cli, f"m:{x},{y}"]
+        try:
+            subprocess.run(cmd, check=True, timeout=5)
+            return f"{'Clicked' if click else 'Hovered'} at ({x},{y})."
+        except subprocess.CalledProcessError as e:
+            return f"cliclick failed: {e}"
+    # No cliclick: AppleScript System Events can synthesise a click via GUI
+    # scripting. It doesn't visibly move the cursor, but the event lands.
+    if not click:
+        return (f"Pointer move to ({x},{y}) needs `cliclick` installed. "
+                f"Run `brew install cliclick`.")
+    script = (
+        f'tell application "System Events"\n'
+        f'  click at {{{x}, {y}}}\n'
+        f'end tell'
+    )
+    try:
+        subprocess.run(
+            ["osascript", "-e", script],
+            check=True, timeout=5, capture_output=True, text=True,
+        )
+        return f"Clicked at ({x},{y})."
+    except subprocess.CalledProcessError as e:
+        return f"Click at ({x},{y}) failed: {(e.stderr or '')[:120]}"
 _OS = platform.system()   # "Windows" | "Darwin" | "Linux"
 
 def _normalize_url(url: str) -> str:
@@ -1322,13 +1403,20 @@ def _gate_permission(browser: str | None, action: str,
 def _gate_sensitive(action: str, parameters: dict,
                     run: Callable[[], str]) -> str:
     """Park a sensitive action behind the HUD banner. Returns the sentence
-    the model should speak while the user confirms."""
+    the model should speak while the user confirms.
+
+    Trust mode skips the gate: filling a form is not submitting it (we type
+    into inputs, the user still clicks Send), so trust_me=True is explicit
+    permission to do that without a confirmation each time. A separate 'submit'
+    action would gate on its own if we ever add one."""
+    if _trust_me():
+        return run()
     if _confirm is None or not _confirm.is_bound():
         return run()
     detail = ""
     if action == "fill_form":
         fields = parameters.get("fields", {}) or {}
-        detail = f"Fill & submit {len(fields)} field(s)."
+        detail = f"Fill {len(fields)} field(s)."
     elif action == "download":
         detail = f"Download: {parameters.get('url', '')[:120]}"
     return _confirm.request(
@@ -1345,6 +1433,15 @@ def _gate_sensitive(action: str, parameters: dict,
 _APPLESCRIPT_ACTIONS = {
     "get_text", "get_url", "scroll", "list_tabs", "switch_tab",
     "press", "click", "smart_click",
+    "go_to", "navigate", "search", "new_tab", "close_tab",
+    "back", "forward", "reload", "screenshot",
+    "type", "smart_type", "fill_form",
+    # Human-like control (System Events): bypasses the Chrome JS-pref entirely.
+    "keystroke", "shortcut", "find", "find_close",
+    "next_tab", "prev_tab", "reopen_tab",
+    "enable_js", "focus_address",
+    # State + pointer
+    "get_state", "hover", "coord_click",
 }
 
 
@@ -1364,19 +1461,165 @@ def _try_applescript(browser: str | None, action: str, params: dict) -> str | No
     )
     if _macchrome.app_name(name) is None:
         return None  # Firefox/Safari: no Chromium AppleScript dict
-    if not _macchrome.is_running(name):
+    # Navigation actions auto-launch the browser if not running; everything
+    # else needs an existing window to target.
+    _launching = action in ("go_to", "navigate", "search", "new_tab")
+    if not _launching and not _macchrome.is_running(name):
         return None  # Nothing to control
     try:
         if action == "get_url":
             return _macchrome.active_url(name)
         if action == "get_text":
-            return _macchrome.get_text(name)
+            return _macchrome.get_text(name, limit=int(params.get("limit", 4000)))
         if action == "scroll":
-            return _macchrome.scroll(
-                name,
-                direction=params.get("direction", "down"),
-                amount=int(params.get("amount", 600)),
-            )
+            direction = params.get("direction", "down")
+            amount = int(params.get("amount", 600))
+            try:
+                return _macchrome.scroll(name, direction=direction, amount=amount)
+            except Exception as _e:
+                # JS-from-AppleEvents is off — fall back to Page Down/Up keys.
+                pages = max(1, amount // 600)
+                return _macchrome.scroll_keys(name, direction=direction, pages=pages)
+        if action in ("go_to", "navigate"):
+            url = params.get("url", "").strip()
+            # Prefer the AppleScript-native URL set (instant, no focus steal).
+            # If it fails because JS/AS is clamped on this profile, fall back
+            # to the human path: Cmd+L, type, Enter — which always works.
+            try:
+                return _macchrome.navigate(name, url)
+            except Exception:
+                return _macchrome.go_to_via_address_bar(name, url)
+        if action == "focus_address":
+            return _macchrome.shortcut(name, "l", ("cmd",))
+        if action == "keystroke":
+            return _macchrome.keystroke(name, params.get("text", ""))
+        if action == "shortcut":
+            key  = params.get("key", "")
+            mods = params.get("modifiers") or params.get("mods") or []
+            if isinstance(mods, str):
+                mods = [m.strip() for m in mods.split("+") if m.strip()]
+            return _macchrome.shortcut(name, key, tuple(mods) or ("cmd",))
+        if action == "find":
+            return _macchrome.find_in_page(name, params.get("text", ""))
+        if action == "find_close":
+            return _macchrome.close_find(name)
+        if action == "next_tab":
+            return _macchrome.next_tab(name)
+        if action == "prev_tab":
+            return _macchrome.prev_tab(name)
+        if action == "reopen_tab":
+            return _macchrome.reopen_tab(name)
+        if action == "enable_js":
+            return _macchrome.enable_js_from_apple_events(name)
+        if action == "search":
+            engine = (params.get("engine") or "google").lower()
+            base = _SEARCH_ENGINES.get(engine, _SEARCH_ENGINES["google"])
+            q = params.get("query", "").strip()
+            if not q:
+                return "Empty search query."
+            return _macchrome.navigate(name, base + q.replace(" ", "+"))
+        if action == "new_tab":
+            return _macchrome.new_tab(name, params.get("url", "").strip())
+        if action == "close_tab":
+            return _macchrome.close_tab(name)
+        if action == "back":
+            return _macchrome.back(name)
+        if action == "forward":
+            return _macchrome.forward(name)
+        if action == "reload":
+            return _macchrome.reload(name)
+        if action == "screenshot":
+            return _macchrome.screenshot(name, params.get("path"))
+        if action == "type" or action == "smart_type":
+            text = params.get("text", "")
+            if not text:
+                return "No text to type."
+            try:
+                return _macchrome.type_text(
+                    name,
+                    selector=params.get("selector"),
+                    text=text,
+                    clear_first=bool(params.get("clear_first", True)),
+                )
+            except Exception:
+                # JS blocked — type into whatever is currently focused via
+                # real OS keystrokes. Caller should Tab/click into the field
+                # first (or set 'selector' once JS pref is on).
+                return _macchrome.keystroke(name, text)
+        if action == "fill_form":
+            raw_fields = params.get("fields", {}) or {}
+            use_prefs = bool(params.get("use_prefs", True))
+            fields = _merge_prefs_into_fields(raw_fields) if use_prefs else dict(raw_fields)
+            def _do_fill() -> str:
+                return _macchrome.fill_form(name, fields)
+            return _gate_sensitive("fill_form", params, _do_fill)
+        if action == "get_state":
+            try:
+                url = _macchrome.active_url(name)
+            except Exception:
+                url = ""
+            try:
+                title = _macchrome.active_title(name)
+            except Exception:
+                title = ""
+            try:
+                tabs = _macchrome.list_tabs(name)
+            except Exception:
+                tabs = []
+            running = _macchrome.is_running(name)
+            return (f"browser={name}; running={running}; url={url}; "
+                    f"title={title[:100]}; tabs={len(tabs)}")
+        if action == "hover" or action == "coord_click":
+            # Human-like pointer action: locate element via CSS or text, read
+            # its page-space rect with JS, convert to screen coords via the
+            # window position/zoom, then use `cliclick` (preferred, pass-
+            # through) or AppleScript System Events to move/click there.
+            target = params.get("selector") or params.get("text") or ""
+            if not target:
+                return "Provide 'selector' or 'text' to point at."
+            rect_js = _REACT_RECT_JS + f"""
+            (function(){{
+              var sel = {_js_str(target)};
+              var el = null;
+              try {{ el = document.querySelector(sel); }} catch(e) {{}}
+              if (!el) {{
+                var t = sel.toLowerCase();
+                el = Array.from(document.querySelectorAll('a,button,[role="button"],input,[onclick]'))
+                  .find(function(e){{ return (e.innerText||e.value||'').toLowerCase().includes(t) && e.offsetParent !== null; }});
+              }}
+              if (!el) return 'NOT_FOUND';
+              el.scrollIntoView({{block:'center', inline:'center', behavior:'instant'}});
+              var r = el.getBoundingClientRect();
+              return JSON.stringify({{
+                x: Math.round(r.left + r.width/2),
+                y: Math.round(r.top  + r.height/2),
+                w: Math.round(r.width), h: Math.round(r.height),
+                sx: window.screenX, sy: window.screenY,
+                iw: window.innerWidth, ih: window.innerHeight,
+                ow: window.outerWidth, oh: window.outerHeight,
+                dpr: window.devicePixelRatio || 1
+              }});
+            }})()"""
+            try:
+                raw = _macchrome.execute_js(name, rect_js)
+            except Exception as e:
+                return f"Cannot locate target (JS blocked?): {e}"
+            if (raw or "").strip() == "NOT_FOUND":
+                return f"Could not find: {target}"
+            import json as _json
+            try:
+                r = _json.loads(raw)
+            except Exception:
+                return f"Unexpected locate response: {raw[:120]}"
+            # Chrome window chrome (title + tab + address bar) sits between
+            # window.screenY and the viewport. Infer its height from outer
+            # vs inner height — close enough for center clicks.
+            chrome_h = max(0, int(r["oh"]) - int(r["ih"]))
+            px = int(r["sx"]) + int(r["x"])
+            py = int(r["sy"]) + chrome_h + int(r["y"])
+            if action == "hover":
+                return _os_pointer(px, py, click=False)
+            return _os_pointer(px, py, click=True)
         if action == "list_tabs":
             tabs = _macchrome.list_tabs(name)
             if not tabs:
@@ -1403,6 +1646,7 @@ def _try_applescript(browser: str | None, action: str, params: dict) -> str | No
             js_map = {
                 "enter":  "document.activeElement && document.activeElement.form && document.activeElement.form.requestSubmit && document.activeElement.form.requestSubmit();",
                 "escape": "document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape'}));",
+                "tab":    "document.activeElement && (function(){const els=Array.from(document.querySelectorAll('input,select,textarea,button,a,[tabindex]'));const i=els.indexOf(document.activeElement);if(i>=0&&i+1<els.length)els[i+1].focus();})();",
             }
             if key in js_map:
                 _macchrome.execute_js(name, js_map[key])
@@ -1418,6 +1662,12 @@ def _try_applescript(browser: str | None, action: str, params: dict) -> str | No
                     f"Open System Settings → Privacy & Security → Automation, "
                     f"find your Terminal / Python app, and enable {_macchrome.app_name(name)}. "
                     f"Then try again.")
+        # Chrome pref "Allow JavaScript from Apple Events" is off. Returning the
+        # hint rather than falling through stops the caller from doing a CDP
+        # relaunch (which would also fail) — user just needs one menu click.
+        if ("Allow JavaScript from Apple Events" in err
+                or "JavaScript through AppleScript is turned off" in err):
+            return err
         return None
     return None
 
@@ -1497,6 +1747,39 @@ def browser_control(
             )
         else:
             result = _start_debug_browser(target, port)
+        _log(player, result)
+        return result
+
+    if action == "set_pref":
+        key = (params.get("key") or "").strip()
+        val = params.get("value", "")
+        if not key:
+            return "Specify 'key' (e.g. name, email, phone)."
+        prefs = _load_prefs()
+        if val in (None, "", False):
+            prefs.pop(key, None)
+            _save_prefs(prefs)
+            result = f"Cleared preference '{key}'."
+        else:
+            prefs[key] = str(val)
+            _save_prefs(prefs)
+            result = f"Saved preference '{key}'."
+        _log(player, result)
+        return result
+
+    if action == "get_prefs":
+        prefs = _load_prefs()
+        if not prefs:
+            result = "No browser preferences saved. Use action='set_pref' with key+value to save."
+        else:
+            lines = [f"  {k}: {v}" for k, v in prefs.items()]
+            result = "Saved browser preferences:\n" + "\n".join(lines)
+        _log(player, result)
+        return result
+
+    if action == "clear_prefs":
+        _save_prefs({})
+        result = "Cleared all browser preferences."
         _log(player, result)
         return result
 
@@ -1595,6 +1878,15 @@ def browser_control(
                 print(f"[Browser] 🔗 Auto-attached to running {target_name}")
             except Exception as e:
                 print(f"[Browser] Auto-attach failed ({e}) — falling back to launch.")
+        elif _OS == "Darwin" and _macchrome is not None and _macchrome.app_name(target_name) is not None:
+            # macOS Chromium browser is running and AppleScript can drive it
+            # for every read/click/type/scroll/navigate action. The CDP relaunch
+            # nudge used to live here, but Chrome M136+ refuses to expose the
+            # debug port on the default profile — the relaunch never attaches,
+            # just closes the user's browser in a loop. _try_applescript above
+            # already handled whatever it can; fall through only for the few
+            # actions AppleScript cannot do (e.g. true DevTools features).
+            print(f"[Browser] AppleScript bridge covers {target_name}; skipping CDP nudge.")
         else:
             result = (
                 f"You already have {target_name} open, but I can't control it "
@@ -1683,13 +1975,13 @@ def _log(player, text: str):
 # ── Tool declaration (auto-discovered by core/action_loader.py) ──────────────
 TOOL = {
     "name": "browser_control",
-    "description": "Controls any web browser. Use for: opening websites, searching the web, clicking elements, filling forms, scrolling, screenshots, navigation, any web-based task. Simple open/search requests launch the user's own browser normally (their real profile and logged-in accounts); interactive actions (click, type, fill_form, scroll, get_text...) require JARVIS to be ATTACHED to that browser. Call 'list_browsers' to see what the user has open on their computer right now (never claim no browser is open based on anything else). If the user asks you to act on their REAL browser (scroll THEIR page, read THEIR tabs, check their logged-in account) and you're not attached, call 'start_debug' first — this quits their browser, reopens it with debug mode and their real profile, and auto-attaches. Only then will scroll/get_text/click act on their actual tabs. If start_debug is refused, degrade gracefully and explain. 'attach' connects to a browser the user already started with --remote-debugging-port=9222; 'attach_help' prints the manual command. fill_form asks for a second confirmation before submitting. 'list_tabs' and 'switch_tab' work across tabs in the attached browser. Always pass the 'browser' parameter when the user names one.",
+    "description": "Controls any web browser like a human would — click, type, scroll, navigate, read, screenshot, hover. On macOS with Chromium-family browsers (chrome, brave, edge, vivaldi, opera, operagx) you drive the user's REAL running browser directly through two complementary bridges: (1) AppleScript for navigation, tab control, URL/title reads and JS-powered actions (get_text, click, scroll, type, fill_form) — needs Chrome's 'Allow JavaScript from Apple Events' pref enabled once (call action='enable_js' to toggle it automatically via menu), and (2) System Events keystroke/shortcut synthesis that bypasses the JS pref entirely (keystroke types into focused field; shortcut sends Cmd+L / Cmd+F / Cmd+T / etc; scroll falls back to Page-Down/Page-Up keys when JS is off). Every action attempts the JS path first and silently falls back to keystroke/HTTP-fetch when JS is blocked, so the feature works even before the user flips the Chrome pref. get_text has an HTTP-fetch fallback that reads the active URL server-side when JS is off. ALWAYS trust browser_control over vision — before you say 'no browser is open', call action='get_state' to check for real; vision only sees the frontmost window, not minimised / background browser windows. Preferences: action='set_pref' with key+value saves common contact info (name, email, phone, company, website, address, etc.) permanently; fill_form auto-fills from this store so the user never has to repeat them; pass use_prefs=false to opt out for one call. Verbs: go_to, search, back, forward, reload, new_tab, close_tab, reopen_tab, next_tab, prev_tab, list_tabs, switch_tab, get_text, get_url, get_state, click, smart_click, coord_click, hover, type, smart_type, fill_form, scroll, screenshot, press, keystroke, shortcut, focus_address, find, find_close, enable_js, set_pref, get_prefs, clear_prefs. Call 'list_browsers' to see what's open. DO NOT call 'start_debug' or 'attach' on macOS Chromium unless the user explicitly asks — recent Chrome builds disable CDP on the default profile and the relaunch just closes their browser. On Windows / Linux, or for Firefox / Safari, interactive control still needs start_debug (quits & reopens with debug port) or attach. 'attach_help' prints the manual command. fill_form proceeds silently when trust mode is on (user already granted). Always pass the 'browser' parameter when the user names one.",
     "parameters": {
         "type": "OBJECT",
         "properties": {
             "action": {
                 "type": "STRING",
-                "description": "go_to | search | click | type | scroll | fill_form | smart_click | smart_type | get_text | get_url | press | new_tab | close_tab | list_tabs | switch_tab | screenshot | back | forward | reload | attach | attach_help | start_debug | switch | list_browsers | close | close_all | trust_me"
+                "description": "go_to | search | click | coord_click | hover | type | scroll | fill_form | smart_click | smart_type | get_text | get_url | get_state | press | new_tab | close_tab | reopen_tab | next_tab | prev_tab | list_tabs | switch_tab | screenshot | back | forward | reload | keystroke | shortcut | focus_address | find | find_close | enable_js | set_pref | get_prefs | clear_prefs | attach | attach_help | start_debug | switch | list_browsers | close | close_all | trust_me"
             },
             "browser": {
                 "type": "STRING",
@@ -1758,6 +2050,18 @@ TOOL = {
             "mode": {
                 "type": "STRING",
                 "description": "For trust_me action: on | off | status"
+            },
+            "modifiers": {
+                "type": "STRING",
+                "description": "Shortcut modifiers for action='shortcut' — comma or plus-separated: 'cmd', 'cmd+shift', 'cmd,option'. Default cmd."
+            },
+            "value": {
+                "type": "STRING",
+                "description": "Value to save under 'key' for action='set_pref' (e.g. name='MD Subho', email='me@example.com')."
+            },
+            "use_prefs": {
+                "type": "BOOLEAN",
+                "description": "For fill_form: auto-merge saved preferences (default true). Set false for one-off forms."
             }
         },
         "required": [
