@@ -31,7 +31,8 @@ memory/session_handle.json
 # One-shot plaintext snapshot kept so a keychain lockout is recoverable.
 memory/long_term.plaintext.bak
 # SQLite stores that hold private user data (CRM, finance, projects,
-# commitments, tasks, vectors). Schema lives in core/*.py; data is the user's.
+# commitments, tasks, vectors, payments, travel). Schema lives in core/*.py;
+# data is the user's.
 memory/*.sqlite
 memory/*.sqlite-wal
 memory/*.sqlite-shm

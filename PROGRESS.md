@@ -3,64 +3,105 @@
 Last updated: 2026-11-04
 
 This file tracks the ongoing transformation of the JARVIS project into the
-ultimate AI Personal Executive Assistant described in the roadmap. Every
-section captures what is done, what is in-flight, what is deferred, and what
-is blocked so a reader (or a future session) can pick up where we left off.
+ultimate AI Personal Executive Assistant described in the roadmap.
 
 ---
 
 ## Current status
 
-- **P0 foundation**: COMPLETE (4/4 modules)
-- **P1 biggest gaps**: COMPLETE (5/5 modules)
-- **P2 exec polish**: COMPLETE (4/4 modules)
-- **P3 life polish**: 4/5 complete (Bangla TTS deferred — needs model download)
-- **P4 stretch**: 1/4 complete (CI landed; speaker ID / smart home / plugin sandbox deferred)
-- **Test suite**: **400 green, 0 failed** (unit + integration)
-- **Blockers**: none; Bangla TTS requires an external voice download and was deferred rather than skipped
+- **P0 foundation**: COMPLETE (4/4)
+- **P1 biggest gaps**: COMPLETE (5/5)
+- **P2 exec polish**: COMPLETE (4/4)
+- **P3 life polish**: 4/5 (Bangla TTS deferred — needs external voice pack)
+- **P4 stretch**: 1/4 (CI live; speaker ID / smart home / plugin sandbox deferred)
+- **P5 multimodal + emotional intelligence**: COMPLETE (5/5)
+- **Test suite**: **474 green, 0 failed** (unit + integration)
+- **Blockers**: none
 
 ---
 
-## Completed modules
+## Module index
 
-### P0 — foundation (previous checkpoint)
-- **P0.1 Learning loop**: `format_memory_for_prompt` injects top-K lessons; `reflection._write_lessons` indexes to vectors
-- **P0.2 Replanner on failure**: `core/planner.replan_from`, `commit_replan`; worker calls it after arg-repair exhaustion
-- **P0.3 Importance-weighted trim**: category weight × 30-day recency half-life
-- **P0.4 Secrets + encryption**: `core/secrets.py` (keyring-first, Fernet), memory encryption with backup
+### P0 — foundation
+| Module | Path |
+|---|---|
+| Learning loop (lessons injected + indexed) | `memory/memory_manager.py`, `core/reflection.py` |
+| Replanner on step failure | `core/planner.py`, `core/worker.py`, `core/tasks.py` |
+| Importance-weighted memory trim | `memory/memory_manager.py` |
+| Secrets + memory encryption | `core/secrets.py`, `memory/memory_manager.py` |
 
-### P1 — biggest gaps (previous checkpoint)
-- **P1.5 CRM + VIP**: `core/crm.py`, `actions/crm.py`, contacts/interactions/follow-ups
-- **P1.6 Gatekeeper**: `core/gatekeeper.py`, `actions/gatekeeper.py`, priority + source + recommendation + conflict detection
-- **P1.7 Decision Support**: `core/decide.py`, `actions/decide.py`, structured ranked recommendation
-- **P1.8 Finance**: `core/finance.py`, `actions/finance.py`, expenses/invoices/subscriptions/budgets/bills/receipts
-- **P1.9 Commitment tracking**: `core/commitments.py`, `actions/commitments.py`, regex extractor + lifecycle
+### P1 — biggest gaps
+| Module | Path |
+|---|---|
+| CRM + VIP layer | `core/crm.py`, `actions/crm.py` |
+| Gatekeeper engine | `core/gatekeeper.py`, `actions/gatekeeper.py` |
+| Decision Support | `core/decide.py`, `actions/decide.py` |
+| Finance subsystem | `core/finance.py`, `actions/finance.py` |
+| Commitment tracking | `core/commitments.py`, `actions/commitments.py` |
 
-### P2 — exec polish (previous checkpoint)
-- **P2.10 Meeting prep**: `actions/meeting_prep.py`, pulls CRM + commitments + follow-ups + conflicts
-- **P2.11 Report generator**: `actions/report_gen.py`, 5 formats, Gemini-assisted + skeleton fallback, markdown or docx
-- **P2.12 Project management**: `core/projects.py`, `actions/project.py`, lifecycle + milestones + tasks + rollup
-- **P2.13 Morning briefing**: `actions/morning_briefing.py`, aggregator over schedule/commitments/follow-ups/bills/budget/projects/emails/news/weather
+### P2 — exec polish
+| Module | Path |
+|---|---|
+| Meeting prep briefing | `actions/meeting_prep.py` |
+| Report / presentation generator | `actions/report_gen.py` |
+| Project management | `core/projects.py`, `actions/project.py` |
+| Morning briefing | `actions/morning_briefing.py` |
 
-### P3 — life polish (this checkpoint)
-- **P3.14 Birthdays**: `actions/birthdays.py` reads CRM.birthday, surfaces upcoming within N days, computes age when year is recorded
-- **P3.15 Travel itinerary**: `core/travel.py`, `actions/travel.py`, trips with legs (flight/train/hotel/transfer/activity), per-currency cost rollup, next-leg query across all trips
-- **P3.16 Timezone utility**: `actions/timezone_util.py`, `now`/`convert`/`windows`; windows sweeps working hours across attendees and returns overlapping slots in UTC + each zone's local time
-- **P3.17 Session handle persistence**: `core/session_store.py`, 12h TTL for the Gemini Live resume handle; `main.py` reads on boot, saves on every update, clears on reject
+### P3 — life polish
+| Module | Path |
+|---|---|
+| Birthday / anniversary reminders | `actions/birthdays.py` |
+| Travel itinerary store | `core/travel.py`, `actions/travel.py` |
+| Timezone utility | `actions/timezone_util.py` |
+| Session handle persistence | `core/session_store.py` |
 
-### P4 — stretch (this checkpoint)
-- **P4.22 CI workflow**: `.github/workflows/test.yml` runs pytest on push/PR against Python 3.11 & 3.12, plus a dedicated smoke-import job; `requirements-ci.txt` carries the minimal subset
+### P4 — stretch
+| Module | Path |
+|---|---|
+| CI workflow | `.github/workflows/test.yml`, `requirements-ci.txt` |
+
+### P5 — multimodal + emotional intelligence (new)
+| Module | Path |
+|---|---|
+| Emotion engine + tone adapter | `core/emotion.py`, `actions/emotion_adapt.py` |
+| Perception core + vision/OCR | `core/perception.py`, `actions/vision_analyze.py` |
+| Multimodal context buffer | `core/context_buffer.py`, `actions/context_recall.py` |
+| Browser flow w/ CAPTCHA pause/resume | `actions/browser_flow.py` |
+| Financial sandbox adapter | `core/payments.py`, `actions/payment.py` |
 
 ---
 
-## Deferred (safe to skip for now)
+## P5 highlights
 
-| ID    | Module                           | Why deferred                         |
-|-------|----------------------------------|--------------------------------------|
-| P3.18 | Bangla TTS                       | Requires downloading a voice pack; external network dependency the autonomous run was told to avoid |
-| P4.19 | Speaker ID (voice biometric)     | Needs an ML model (resemblyzer / pyannote) — heavy download, better done interactively |
-| P4.20 | Smart home bridge                | Needs device credentials the autonomous run cannot acquire |
-| P4.21 | Plugin hot-reload + sandbox      | Larger architectural change; scheduled for a dedicated session with the user |
+**Emotion engine** — pure-regex / lexicon classifier returning primary cue
+(frustration / urgency / stress / confusion / excitement / sadness /
+gratitude / neutral), confidence, and a suggested response tone.
+Simulated, never claimed as feeling. Tone preference round-trips through
+long-term memory so the model sees it in every future prompt.
+
+**Perception core** — single ``analyze_image`` call covering describe /
+OCR / objects / UI / Q&A. Tries local ``pytesseract`` for OCR before
+Gemini. Three sources: screen / camera / file. Every observation lands
+in the context buffer so follow-up turns can reference "what you just
+saw".
+
+**Context buffer** — session-scoped ring (max 200) of
+``{kind, summary, ts, meta}`` entries. Recent / search / record /
+clear. Thread-safe deque; best-effort writes never raise.
+
+**Browser flow** — wraps the existing ``browser_control`` tool with
+multi-step sequencing, per-step verifier (url_contains / page_contains /
+not_url), and a CAPTCHA detector combining URL / text / DOM signals.
+On detection the sequence PAUSES and returns a ``resume_step`` so a
+human can clear the challenge in the real browser before the planner
+calls back in. **Never bypasses CAPTCHA.**
+
+**Payments** — two-step prepare/confirm with an explicit
+``confirmed_by`` proof. Live keys are hard-refused (``sk_live_...``
+returns ``PaymentSecurityError``); only ``sk_test_`` / sandbox
+credentials ever reach the provider path, and only when the user has
+stored them via ``core/secrets``. Local sandbox is the default and
+mirrors confirmed amounts into ``finance.add_expense``.
 
 ---
 
@@ -81,9 +122,14 @@ is blocked so a reader (or a future session) can pick up where we left off.
 | Travel             | 15        |
 | Timezone utility   | 13        |
 | Session store      | 7         |
-| **New total**      | **162**   |
+| Emotion            | 15        |
+| Perception         | 13        |
+| Context buffer     | 10        |
+| Browser flow       | 19        |
+| Payments           | 17        |
+| **New total**      | **236**   |
 | Plus existing user tests + integration | 238 |
-| **Grand total**    | **400 (all green)** |
+| **Grand total**    | **474 (all green)** |
 
 ---
 
@@ -91,20 +137,24 @@ is blocked so a reader (or a future session) can pick up where we left off.
 
 - Confirm gate, undo stack, action/plugin auto-discovery preserved
 - No existing feature removed
-- No external API called; no payment execution; no email / message sent; no money moved
-- All new persistent stores are per-user sqlite under `memory/` and gitignored
-- Encrypted-at-rest for memory is opt-in-by-presence (keyring OR local 0600 key); plaintext backup preserved on first migration
-- Report generator sandboxes output paths under `$HOME`
-- Session handle persistence capped at 12h TTL so stale server-side sessions don't linger
+- Payments: no real money ever moved; live keys refused; every confirm
+  requires explicit proof
+- Browser: CAPTCHA never bypassed — detect → pause → human → resume
+- Vision: no claim of continuous perception; every observation hashed
+  so callers can trace the exact bytes
+- Emotion: never asserts "I feel X" — only suggests tone to apply
+- All new persistent stores are per-user sqlite under `memory/` and
+  gitignored
 
 ---
 
-## What's next (if the user wants to continue)
+## Deferred (safe to skip for now)
 
-Highest-leverage remaining items, in rough order:
-
-1. **Bangla TTS integration** — pick a voice pack (`edge-tts bn-BD` is free; or a Kokoro Bangla model). Affects users in the Bangladesh / Bengali market; tracked by audit section 1 as the Bangla capability gap.
-2. **Speaker ID / voice biometric** — enables multi-user support and per-user memory isolation. Needs resemblyzer or pyannote; one evening's work with the model downloads.
-3. **Plugin sandbox** — audit flagged plugins run with full process privileges. Options: subprocess isolation (slow but safe), capability-based restrictions.
-4. **Smart home bridge** — HomeKit (macOS) + MQTT would cover most users. Needs API keys / device auth.
-5. **Dashboard rate limiting** — audit flagged, unimplemented. Add `slowapi` or similar to the FastAPI app.
+| ID    | Module                           | Why deferred                         |
+|-------|----------------------------------|--------------------------------------|
+| P3.18 | Bangla TTS                       | Requires downloading a voice pack    |
+| P4.19 | Speaker ID (voice biometric)     | Needs ML model download              |
+| P4.20 | Smart home bridge                | Needs device credentials             |
+| P4.21 | Plugin hot-reload + sandbox      | Larger architectural change          |
+| P5.x  | Dashboard rate limiting          | Audit-flagged; add slowapi next pass |
+| P5.x  | Live Stripe/PayPal SDK calls     | Only sandbox credentials supported   |

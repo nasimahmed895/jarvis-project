@@ -60,10 +60,15 @@ jobs:
               "core.secrets", "core.crm", "core.gatekeeper", "core.decide",
               "core.finance", "core.commitments", "core.projects",
               "core.travel", "core.session_store",
+              "core.emotion", "core.perception", "core.context_buffer",
+              "core.payments",
               "actions.crm", "actions.gatekeeper", "actions.decide",
               "actions.finance", "actions.commitments", "actions.meeting_prep",
               "actions.report_gen", "actions.project", "actions.morning_briefing",
               "actions.birthdays", "actions.travel", "actions.timezone_util",
+              "actions.emotion_adapt", "actions.vision_analyze",
+              "actions.context_recall", "actions.browser_flow",
+              "actions.payment",
           ]
           for m in mods:
               importlib.import_module(m)
