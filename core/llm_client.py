@@ -1,20 +1,25 @@
 """
-Local LLM client for MARK XL.
+LLM client for MARK XL.
 
-Supports two backends — selected via  "llm_provider"  in config/api_keys.json:
+Backends — selected via  "llm_provider"  in config/api_keys.json:
 
   "llm_provider": "ollama"   (default)
-        Uses Ollama's native /api/chat endpoint.
-        Download: https://ollama.com
-        Default port: 11434
+        Ollama's native /api/chat endpoint. https://ollama.com  (port 11434)
 
-  "llm_provider": "openai"
-        Uses any OpenAI-compatible server: LM Studio, Jan, LocalAI,
-        llama.cpp server, vLLM, etc.
-        LM Studio download: https://lmstudio.ai   (default port: 1234)
-        Set  "llm_url": "http://localhost:1234"  in config.
-        Note: tool-calling support depends on the model; use a model that
-        supports function/tool calls (e.g. Qwen2.5, Llama-3.1, Mistral).
+  "llm_provider": "openai" | "openrouter" | "groq" | "lmstudio" | "localai" | "jan" | "llamacpp"
+        Any OpenAI-compatible /v1/chat/completions server.
+        For cloud (OpenAI, OpenRouter, Groq) also set "llm_api_key".
+        URLs:
+          OpenAI      https://api.openai.com
+          OpenRouter  https://openrouter.ai/api
+          Groq        https://api.groq.com/openai
+        Local servers (LM Studio http://localhost:1234, etc.) need no key.
+        Tool-calling support depends on the model.
+
+  "llm_provider": "anthropic"
+        Anthropic /v1/messages. Set "llm_api_key" to sk-ant-...
+        Default URL: https://api.anthropic.com
+        Non-streaming only (stream falls back to non-stream call).
 """
 import json
 import re
@@ -42,14 +47,52 @@ CONFIG_PATH = BASE_DIR / "config" / "api_keys.json"
 _DEFAULTS = {
     "llm_url":      "http://localhost:11434",
     "llm_model":    "llama3.2",
-    "llm_provider": "ollama",   # "ollama" | "openai"
+    "llm_provider": "ollama",   # "ollama" | "openai" | "anthropic"
 }
+
+# Provider → default base URL (used when "llm_url" is missing from config).
+_PROVIDER_URLS = {
+    "openai":     "https://api.openai.com",
+    "openrouter": "https://openrouter.ai/api",
+    "groq":       "https://api.groq.com/openai",
+    "anthropic":  "https://api.anthropic.com",
+}
+
+_ANTHROPIC_VERSION = "2023-06-01"
 
 
 def get_llm_provider() -> str:
-    """Returns 'ollama' or 'openai' (covers LM Studio, LocalAI, Jan, etc.)."""
+    """
+    Normalises the raw provider string to one of:
+        'ollama', 'openai' (covers OpenAI, OpenRouter, Groq, LM Studio, …),
+        'anthropic'.
+    """
     raw = _load_config().get("llm_provider", "ollama").strip().lower()
-    return "openai" if raw in ("openai", "lmstudio", "localai", "jan", "llamacpp") else "ollama"
+    if raw == "anthropic":
+        return "anthropic"
+    if raw in ("openai", "openrouter", "groq", "lmstudio", "localai", "jan", "llamacpp"):
+        return "openai"
+    return "ollama"
+
+
+def get_llm_api_key() -> str | None:
+    """API key for cloud providers (OpenAI, OpenRouter, Groq, Anthropic)."""
+    key = _load_config().get("llm_api_key")
+    return key.strip() if isinstance(key, str) and key.strip() else None
+
+
+def _auth_headers() -> dict:
+    """Bearer header for OpenAI-compatible endpoints. Empty when no key set."""
+    key = get_llm_api_key()
+    return {"Authorization": f"Bearer {key}"} if key else {}
+
+
+def _anthropic_headers() -> dict:
+    return {
+        "x-api-key":         get_llm_api_key() or "",
+        "anthropic-version": _ANTHROPIC_VERSION,
+        "content-type":      "application/json",
+    }
 
 
 def _load_config() -> dict:
@@ -68,21 +111,37 @@ def ensure_ollama_running(timeout: int = 15) -> bool:
     url, _   = get_llm_settings()
     provider = get_llm_provider()
 
+    if provider == "anthropic":
+        # Anthropic has no public liveness probe; we just verify DNS + TLS reach
+        # by hitting /v1/models (returns 200 with a valid key, 401 without).
+        # Either is "reachable" from this function's perspective.
+        try:
+            resp = requests.get(f"{url}/v1/models", headers=_anthropic_headers(), timeout=5)
+            if resp.status_code in (200, 401):
+                print(f"[LLM] Anthropic endpoint reachable at {url} (status {resp.status_code}).")
+                return True
+            print(f"[LLM] Anthropic endpoint returned status {resp.status_code}.")
+            return False
+        except Exception as e:
+            print(f"[LLM] Cannot reach Anthropic endpoint at {url}: {e}")
+            return False
+
     if provider == "openai":
-        # OpenAI-compatible servers (LM Studio, LocalAI, etc.) must be started
-        # by the user — we just check if they're reachable.
+        # OpenAI-compatible servers: cloud (OpenAI/OpenRouter/Groq) or local
+        # (LM Studio/LocalAI/Jan). Local servers must be started by the user.
         health = f"{url}/v1/models"
         try:
-            ok = requests.get(health, timeout=5).status_code == 200
+            ok = requests.get(health, headers=_auth_headers(), timeout=5).status_code == 200
             if ok:
                 print(f"[LLM] OpenAI-compatible server reachable at {url}")
             else:
-                print(f"[LLM] Server at {url} returned non-200.  Is it running?")
+                print(f"[LLM] Server at {url} returned non-200.  Is it running / is the key correct?")
             return ok
         except Exception as e:
             print(
                 f"[LLM] Cannot reach OpenAI-compatible server at {url}.\n"
-                "      Make sure LM Studio / LocalAI / Jan is running and the server is started."
+                "      Local: start LM Studio / LocalAI / Jan.\n"
+                "      Cloud: check llm_api_key + network."
             )
             return False
 
@@ -146,6 +205,12 @@ def warmup_model(system_prompt: str | None = None) -> bool:
         messages.append({"role": "system", "content": system_prompt})
     messages.append({"role": "user", "content": "hi"})
 
+    if provider == "anthropic":
+        # No warmup contract for Anthropic — cloud models are always "warm".
+        # Skip the ping so we don't spend tokens for nothing.
+        print(f"[LLM] '{model}' ready (Anthropic, no warmup).")
+        return True
+
     if provider == "openai":
         # OpenAI-compatible: just fire a minimal request to ensure the model is loaded.
         # No keep_alive or KV-cache priming available — server manages this internally.
@@ -156,7 +221,12 @@ def warmup_model(system_prompt: str | None = None) -> bool:
             "max_tokens": 1,
         }
         try:
-            resp = requests.post(f"{url}/v1/chat/completions", json=payload, timeout=180)
+            resp = requests.post(
+                f"{url}/v1/chat/completions",
+                json=payload,
+                headers=_auth_headers(),
+                timeout=180,
+            )
             resp.raise_for_status()
             print(f"[LLM] '{model}' ready (OpenAI-compatible server).")
             return True
@@ -219,11 +289,151 @@ def check_model_available(log: Callable | None = None) -> bool:
 
 
 def get_llm_settings() -> tuple[str, str]:
-    """Returns (base_url, model_name)."""
-    cfg   = _load_config()
-    url   = cfg.get("llm_url",   _DEFAULTS["llm_url"]).rstrip("/")
-    model = cfg.get("llm_model", _DEFAULTS["llm_model"])
+    """
+    Returns (base_url, model_name).
+
+    If 'llm_url' is not set, pick a provider-appropriate default so cloud users
+    only need llm_provider + llm_api_key + llm_model.
+    """
+    cfg      = _load_config()
+    raw_prov = cfg.get("llm_provider", _DEFAULTS["llm_provider"]).strip().lower()
+    default  = _PROVIDER_URLS.get(raw_prov, _DEFAULTS["llm_url"])
+    url      = cfg.get("llm_url", default).rstrip("/")
+    model    = cfg.get("llm_model", _DEFAULTS["llm_model"])
     return url, model
+
+
+def _split_sentences(text: str) -> list[str]:
+    """Split a block of text on sentence boundaries, keep order, drop empties."""
+    out: list[str] = []
+    buf = text
+    while True:
+        m = _SENT_END.search(buf)
+        if not m:
+            break
+        sent = buf[: m.start() + 1].strip()
+        buf  = buf[m.end():]
+        if sent:
+            out.append(sent)
+    if buf.strip():
+        out.append(buf.strip())
+    return out
+
+
+def _anthropic_tools(tools: list) -> list:
+    """Convert OpenAI-style tool specs to Anthropic input_schema format."""
+    out = []
+    for t in tools:
+        fn = t.get("function") or t
+        out.append({
+            "name":        fn["name"],
+            "description": fn.get("description", ""),
+            "input_schema": fn.get("parameters") or fn.get("input_schema") or {},
+        })
+    return out
+
+
+def _call_anthropic(
+    url:      str,
+    model:    str,
+    messages: list,
+    tools:    list | None,
+    timeout:  int,
+) -> dict:
+    """
+    Non-streaming Anthropic /v1/messages call. Returns the Ollama-shaped dict
+    {"content": str, "tool_calls": list} so callers need no provider branch.
+    """
+    # Anthropic puts system prompts in a top-level field, not in messages.
+    sys_parts: list[str] = []
+    convo:     list[dict] = []
+    for m in messages:
+        role    = m.get("role")
+        content = m.get("content")
+        if role == "system":
+            if isinstance(content, str) and content.strip():
+                sys_parts.append(content)
+            continue
+        if role == "tool":
+            # Map OpenAI tool-result messages → Anthropic tool_result blocks.
+            convo.append({
+                "role": "user",
+                "content": [{
+                    "type":        "tool_result",
+                    "tool_use_id": m.get("tool_call_id") or m.get("id") or "",
+                    "content":     content if isinstance(content, str) else json.dumps(content),
+                }],
+            })
+            continue
+        if role == "assistant" and m.get("tool_calls"):
+            # Replay OpenAI-style assistant tool_calls as Anthropic tool_use blocks.
+            blocks: list[dict] = []
+            if isinstance(content, str) and content:
+                blocks.append({"type": "text", "text": content})
+            for tc in m["tool_calls"]:
+                fn    = tc.get("function", {})
+                args  = fn.get("arguments")
+                if isinstance(args, str):
+                    try:
+                        args = json.loads(args)
+                    except Exception:
+                        args = {"_raw": args}
+                blocks.append({
+                    "type":  "tool_use",
+                    "id":    tc.get("id", ""),
+                    "name":  fn.get("name", ""),
+                    "input": args or {},
+                })
+            convo.append({"role": "assistant", "content": blocks})
+            continue
+        convo.append({"role": role, "content": content})
+
+    payload: dict = {
+        "model":      model,
+        "messages":   convo,
+        "max_tokens": 1024,
+    }
+    if sys_parts:
+        payload["system"] = "\n\n".join(sys_parts)
+    if tools:
+        payload["tools"] = _anthropic_tools(tools)
+
+    try:
+        resp = requests.post(
+            f"{url}/v1/messages",
+            json=payload,
+            headers=_anthropic_headers(),
+            timeout=timeout,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except requests.exceptions.Timeout:
+        raise RuntimeError("Anthropic request timed out.")
+    except requests.exceptions.HTTPError as e:
+        body = ""
+        try:
+            body = e.response.text[:300]
+        except Exception:
+            pass
+        raise RuntimeError(f"Anthropic HTTP {e.response.status_code}: {body}")
+    except Exception as e:
+        raise RuntimeError(f"Anthropic call failed: {e}")
+
+    content_text = ""
+    tc_list:  list = []
+    for block in data.get("content", []):
+        btype = block.get("type")
+        if btype == "text":
+            content_text += block.get("text", "")
+        elif btype == "tool_use":
+            tc_list.append({
+                "id":       block.get("id", ""),
+                "function": {
+                    "name":      block.get("name", ""),
+                    "arguments": block.get("input") or {},
+                },
+            })
+    return {"content": content_text.strip(), "tool_calls": tc_list}
 
 
 def call_llm(
@@ -240,6 +450,9 @@ def call_llm(
     url, model = get_llm_settings()
     provider   = get_llm_provider()
 
+    if provider == "anthropic":
+        return _call_anthropic(url, model, messages, tools, timeout)
+
     if provider == "openai":
         endpoint = f"{url}/v1/chat/completions"
         payload: dict = {
@@ -252,7 +465,7 @@ def call_llm(
             payload["tools"]       = tools
             payload["tool_choice"] = "auto"
         try:
-            resp = requests.post(endpoint, json=payload, timeout=timeout)
+            resp = requests.post(endpoint, json=payload, headers=_auth_headers(), timeout=timeout)
             resp.raise_for_status()
             choice = resp.json().get("choices", [{}])[0]
             msg    = choice.get("message", {})
@@ -337,9 +550,11 @@ def call_llm_text(
     """
     Simple text-only generation (no tools).
     Used by planner, executor, error_handler, code_helper, dev_agent.
+
+    Routes by provider so cloud backends work from the same helper.
     """
     url, default_model = get_llm_settings()
-    endpoint = f"{url}/api/chat"
+    provider = get_llm_provider()
     m        = model or default_model
 
     messages: list[dict] = []
@@ -347,7 +562,24 @@ def call_llm_text(
         messages.append({"role": "system", "content": system})
     messages.append({"role": "user", "content": prompt})
 
-    payload = {"model": m, "messages": messages, "stream": False, "keep_alive": -1, "options": {"num_predict": 600}}
+    if provider == "anthropic":
+        result = _call_anthropic(url, m, messages, None, timeout)
+        return (result.get("content") or "").strip()
+
+    if provider == "openai":
+        endpoint = f"{url}/v1/chat/completions"
+        payload  = {"model": m, "messages": messages, "stream": False, "max_tokens": 600}
+        try:
+            resp = requests.post(endpoint, json=payload, headers=_auth_headers(), timeout=timeout)
+            resp.raise_for_status()
+            choice = resp.json().get("choices", [{}])[0]
+            return (choice.get("message", {}).get("content") or "").strip()
+        except Exception as e:
+            raise RuntimeError(f"OpenAI-compatible text call failed: {e}")
+
+    # ── Ollama ──────────────────────────────────────────────────────────────
+    endpoint = f"{url}/api/chat"
+    payload  = {"model": m, "messages": messages, "stream": False, "keep_alive": -1, "options": {"num_predict": 600}}
 
     try:
         resp = requests.post(endpoint, json=payload, timeout=timeout)
@@ -394,7 +626,13 @@ def _stream_openai(
         payload["tool_choice"] = "auto"
 
     try:
-        with requests.post(endpoint, json=payload, timeout=timeout, stream=True) as resp:
+        with requests.post(
+            endpoint,
+            json=payload,
+            headers=_auth_headers(),
+            timeout=timeout,
+            stream=True,
+        ) as resp:
             resp.raise_for_status()
             full_content = ""
             buf          = ""
@@ -503,6 +741,20 @@ def call_llm_stream(
     provider = get_llm_provider()
     if provider == "openai":
         yield from _stream_openai(messages, tools, timeout)
+        return
+    if provider == "anthropic":
+        # Anthropic streaming parser isn't implemented — fall back to non-stream,
+        # then split the reply into sentences so downstream TTS still works.
+        result = call_llm(messages, tools, timeout)
+        text   = result.get("content") or ""
+        for sent in _split_sentences(text):
+            if sent:
+                yield {"type": "sentence", "text": sent}
+        yield {
+            "type":       "done",
+            "content":    text.strip(),
+            "tool_calls": result.get("tool_calls") or [],
+        }
         return
 
     url, model = get_llm_settings()

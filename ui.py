@@ -1712,9 +1712,20 @@ class _CameraPreview(QWidget):
 
 
 class SetupOverlay(QWidget):
-    done = pyqtSignal(str, str)
+    # Payload: {"gemini_api_key","os_system","llm_provider","llm_api_key","llm_model"}.
+    done = pyqtSignal(dict)
 
-    def __init__(self, parent=None):
+    # Provider → (label, default model, needs_api_key, placeholder).
+    _PROVIDERS: list[tuple[str, str, str, bool, str]] = [
+        # id,          label,                     default model,                  key?,  placeholder
+        ("ollama",     "Ollama (local, default)", "llama3.2",                     False, "no key — local"),
+        ("openai",     "OpenAI",                  "gpt-4o-mini",                  True,  "sk-…"),
+        ("openrouter", "OpenRouter",              "anthropic/claude-3.5-sonnet",  True,  "sk-or-v1-…"),
+        ("groq",       "Groq",                    "llama-3.3-70b-versatile",      True,  "gsk_…"),
+        ("anthropic",  "Anthropic",               "claude-opus-4-5",              True,  "sk-ant-…"),
+    ]
+
+    def __init__(self, parent=None, existing: dict | None = None):
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setStyleSheet(f"""
@@ -1725,14 +1736,19 @@ class SetupOverlay(QWidget):
             }}
         """)
 
+        existing = existing or {}
+
         detected = {"darwin": "mac", "windows": "windows"}.get(
             _OS.lower(), "linux"
         )
-        self._sel_os = detected
+        self._sel_os = existing.get("os_system") or detected
+        self._sel_provider = (existing.get("llm_provider") or "ollama").strip().lower()
+        if self._sel_provider not in {p[0] for p in self._PROVIDERS}:
+            self._sel_provider = "ollama"
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(30, 22, 30, 22)
-        layout.setSpacing(8)
+        layout.setContentsMargins(30, 20, 30, 20)
+        layout.setSpacing(6)
 
         def _lbl(txt, font_size=9, bold=False, color=C.PRI,
                  align=Qt.AlignmentFlag.AlignCenter):
@@ -1743,35 +1759,79 @@ class SetupOverlay(QWidget):
             w.setStyleSheet(f"color: {color}; background: transparent;")
             return w
 
+        def _line_edit(placeholder: str, password: bool = False, prefill: str = "") -> QLineEdit:
+            le = QLineEdit()
+            if password:
+                le.setEchoMode(QLineEdit.EchoMode.Password)
+            le.setPlaceholderText(placeholder)
+            le.setFont(QFont("Courier New", 10))
+            le.setFixedHeight(30)
+            le.setText(prefill)
+            le.setStyleSheet(f"""
+                QLineEdit {{
+                    background: #000d12; color: {C.TEXT};
+                    border: 1px solid {C.BORDER}; border-radius: 3px; padding: 4px 8px;
+                }}
+                QLineEdit:focus {{ border: 1px solid {C.PRI}; }}
+            """)
+            return le
+
         layout.addWidget(_lbl("◈  INITIALISATION REQUIRED", 13, True))
         layout.addWidget(_lbl("Configure J.A.R.V.I.S. before first boot.", 9, color=C.PRI_DIM))
-        layout.addSpacing(6)
+        layout.addSpacing(4)
 
         sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine)
         sep.setStyleSheet(f"color: {C.BORDER};"); layout.addWidget(sep)
-        layout.addSpacing(4)
 
-        layout.addWidget(_lbl("GEMINI API KEY", 8, color=C.TEXT_DIM,
+        # ── Gemini key (voice path, Live API) ──────────────────────────────
+        layout.addWidget(_lbl("GEMINI API KEY (voice)", 8, color=C.TEXT_DIM,
                                align=Qt.AlignmentFlag.AlignLeft))
-        self._key_input = QLineEdit()
-        self._key_input.setEchoMode(QLineEdit.EchoMode.Password)
-        self._key_input.setPlaceholderText("AIza…")
-        self._key_input.setFont(QFont("Courier New", 10))
-        self._key_input.setFixedHeight(32)
-        self._key_input.setStyleSheet(f"""
-            QLineEdit {{
-                background: #000d12; color: {C.TEXT};
-                border: 1px solid {C.BORDER}; border-radius: 3px; padding: 4px 8px;
-            }}
-            QLineEdit:focus {{ border: 1px solid {C.PRI}; }}
-        """)
+        self._key_input = _line_edit("AIza…", password=True,
+                                     prefill=existing.get("gemini_api_key", ""))
         layout.addWidget(self._key_input)
-        layout.addSpacing(12)
 
+        # ── Text-LLM backend selector ──────────────────────────────────────
+        layout.addSpacing(6)
+        sep_llm = QFrame(); sep_llm.setFrameShape(QFrame.Shape.HLine)
+        sep_llm.setStyleSheet(f"color: {C.BORDER};"); layout.addWidget(sep_llm)
+        layout.addWidget(_lbl("TEXT LLM BACKEND (planner/tools)", 8, color=C.TEXT_DIM,
+                               align=Qt.AlignmentFlag.AlignLeft))
+
+        self._provider_combo = QComboBox()
+        self._provider_combo.setFont(QFont("Courier New", 9))
+        self._provider_combo.setFixedHeight(28)
+        self._provider_combo.setCursor(Qt.CursorShape.PointingHandCursor)
+        for pid, label, _model, _needs, _ph in self._PROVIDERS:
+            self._provider_combo.addItem(label, pid)
+        self._provider_combo.setStyleSheet(
+            f"QComboBox {{ background: #000d12; color: {C.TEXT}; "
+            f"border: 1px solid {C.BORDER}; border-radius: 3px; padding: 2px 8px; }}"
+            f"QComboBox:hover {{ border-color: {C.BORDER_B}; }}"
+            f"QComboBox QAbstractItemView {{ background: #000d12; color: {C.TEXT}; "
+            f"border: 1px solid {C.BORDER}; selection-background-color: {C.PRI_GHO}; }}"
+        )
+        # Restore current selection.
+        for i in range(self._provider_combo.count()):
+            if self._provider_combo.itemData(i) == self._sel_provider:
+                self._provider_combo.setCurrentIndex(i)
+                break
+        self._provider_combo.currentIndexChanged.connect(self._on_provider_changed)
+        layout.addWidget(self._provider_combo)
+
+        self._llm_key_input = _line_edit("", password=True,
+                                         prefill=existing.get("llm_api_key", ""))
+        layout.addWidget(self._llm_key_input)
+
+        self._llm_model_input = _line_edit("", password=False,
+                                           prefill=existing.get("llm_model", ""))
+        layout.addWidget(self._llm_model_input)
+
+        self._on_provider_changed(self._provider_combo.currentIndex())
+
+        # ── OS row ─────────────────────────────────────────────────────────
+        layout.addSpacing(6)
         sep2 = QFrame(); sep2.setFrameShape(QFrame.Shape.HLine)
         sep2.setStyleSheet(f"color: {C.BORDER};"); layout.addWidget(sep2)
-        layout.addSpacing(4)
-
         layout.addWidget(_lbl("OPERATING SYSTEM", 8, color=C.TEXT_DIM,
                                align=Qt.AlignmentFlag.AlignLeft))
         det_name = {"windows": "Windows", "mac": "macOS", "linux": "Linux"}[detected]
@@ -1783,18 +1843,18 @@ class SetupOverlay(QWidget):
         for key, label in [("windows","⊞  Windows"),("mac","  macOS"),("linux","🐧  Linux")]:
             btn = QPushButton(label)
             btn.setFont(QFont("Courier New", 9, QFont.Weight.Bold))
-            btn.setFixedHeight(32)
+            btn.setFixedHeight(30)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.clicked.connect(lambda _, k=key: self._sel(k))
             os_row.addWidget(btn)
             self._os_btns[key] = btn
         layout.addLayout(os_row)
-        self._sel(detected)
-        layout.addSpacing(12)
+        self._sel(self._sel_os)
+        layout.addSpacing(8)
 
         init_btn = QPushButton("▸  INITIALISE SYSTEMS")
         init_btn.setFont(QFont("Courier New", 10, QFont.Weight.Bold))
-        init_btn.setFixedHeight(36)
+        init_btn.setFixedHeight(34)
         init_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         init_btn.setStyleSheet(f"""
             QPushButton {{
@@ -1807,6 +1867,29 @@ class SetupOverlay(QWidget):
         """)
         init_btn.clicked.connect(self._submit)
         layout.addWidget(init_btn)
+
+    def _provider_spec(self, pid: str) -> tuple[str, str, str, bool, str]:
+        for row in self._PROVIDERS:
+            if row[0] == pid:
+                return row
+        return self._PROVIDERS[0]
+
+    def _on_provider_changed(self, _idx: int):
+        pid = self._provider_combo.currentData()
+        _pid, _label, default_model, needs_key, placeholder = self._provider_spec(pid)
+        self._sel_provider = pid
+
+        # API-key field visibility.
+        self._llm_key_input.setVisible(needs_key)
+        self._llm_key_input.setPlaceholderText(placeholder if needs_key else "")
+        if not needs_key:
+            self._llm_key_input.clear()
+
+        # Model field: suggest default, but let user override.
+        current = self._llm_model_input.text().strip()
+        if not current:
+            self._llm_model_input.setText(default_model)
+        self._llm_model_input.setPlaceholderText(default_model)
 
     def _sel(self, key: str):
         self._sel_os = key
@@ -1829,15 +1912,33 @@ class SetupOverlay(QWidget):
                     QPushButton:hover {{ color: {C.TEXT}; border: 1px solid {C.BORDER_B}; }}
                 """)
 
+    def _flash_red(self, widget: QLineEdit):
+        widget.setStyleSheet(
+            widget.styleSheet() + f" QLineEdit {{ border: 1px solid {C.RED}; }}"
+        )
+
     def _submit(self):
         key = self._key_input.text().strip()
         if not key:
-            self._key_input.setStyleSheet(
-                self._key_input.styleSheet() +
-                f" QLineEdit {{ border: 1px solid {C.RED}; }}"
-            )
+            self._flash_red(self._key_input)
             return
-        self.done.emit(key, self._sel_os)
+
+        pid = self._sel_provider
+        _p, _l, default_model, needs_key, _ph = self._provider_spec(pid)
+        llm_key   = self._llm_key_input.text().strip()
+        llm_model = self._llm_model_input.text().strip() or default_model
+
+        if needs_key and not llm_key:
+            self._flash_red(self._llm_key_input)
+            return
+
+        self.done.emit({
+            "gemini_api_key": key,
+            "os_system":      self._sel_os,
+            "llm_provider":   pid,
+            "llm_api_key":    llm_key,   # empty string for ollama; fine
+            "llm_model":      llm_model,
+        })
 
 
 class HueWheel(QWidget):
@@ -6303,9 +6404,10 @@ class MainWindow(QMainWindow):
             return False
 
     def _show_setup(self):
-        ov = SetupOverlay(self.centralWidget())
+        existing = _read_full_config()
+        ov = SetupOverlay(self.centralWidget(), existing=existing)
         cw = self.centralWidget()
-        ow, oh = 460, 390
+        ow, oh = 480, 560
         ov.setGeometry(
             (cw.width()  - ow) // 2,
             (cw.height() - oh) // 2,
@@ -6315,19 +6417,50 @@ class MainWindow(QMainWindow):
         ov.show()
         self._overlay = ov
 
-    def _on_setup_done(self, key: str, os_name: str):
+    def _on_setup_done(self, payload: dict):
         os.makedirs(CONFIG_DIR, exist_ok=True)
-        API_FILE.write_text(
-            json.dumps({"gemini_api_key": key, "os_system": os_name}, indent=4),
-            encoding="utf-8",
-        )
+
+        # Preserve any pre-existing keys (hud_style, assistant_name, …) by merging.
+        existing: dict = {}
+        if API_FILE.exists():
+            try:
+                existing = json.loads(API_FILE.read_text(encoding="utf-8")) or {}
+            except Exception:
+                existing = {}
+
+        merged = {**existing}
+        merged["gemini_api_key"] = payload.get("gemini_api_key", "")
+        merged["os_system"]      = payload.get("os_system", "")
+
+        provider  = (payload.get("llm_provider") or "").strip().lower()
+        llm_key   = (payload.get("llm_api_key")  or "").strip()
+        llm_model = (payload.get("llm_model")    or "").strip()
+
+        if provider:
+            merged["llm_provider"] = provider
+        # Only persist llm_api_key when the provider needs one — otherwise
+        # drop the field so leftover cloud keys don't linger when the user
+        # switches back to Ollama.
+        if provider == "ollama" or not provider:
+            merged.pop("llm_api_key", None)
+        elif llm_key:
+            merged["llm_api_key"] = llm_key
+        if llm_model:
+            merged["llm_model"] = llm_model
+
+        API_FILE.write_text(json.dumps(merged, indent=4), encoding="utf-8")
+
         self._ready = True
         if self._overlay:
             self._overlay.hide()
             self._overlay = None
         self._apply_state("LISTENING")
         self._assistant_name = _read_full_config().get("assistant_name", "JARVIS") or "JARVIS"
-        self._log.append_log(f"SYS: Initialised. OS={os_name.upper()}. {self._assistant_name} online.")
+        os_name = payload.get("os_system", "?")
+        self._log.append_log(
+            f"SYS: Initialised. OS={os_name.upper()}. "
+            f"LLM={provider or 'ollama'}. {self._assistant_name} online."
+        )
 
 
 class _RootShim:
