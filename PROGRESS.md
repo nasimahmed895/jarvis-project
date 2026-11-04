@@ -11,9 +11,12 @@ is blocked so a reader (or a future session) can pick up where we left off.
 
 ## Current status
 
-- **P0 foundation**: COMPLETE (4/4 modules, all smoke tests green)
-- **P1 biggest gaps**: 4/5 complete, P1.9 commitment tracking in-flight
-- **P2 exec polish**: not yet started
+- **P0 foundation**: COMPLETE (4/4 modules)
+- **P1 biggest gaps**: COMPLETE (5/5 modules)
+- **P2 exec polish**: COMPLETE (4/4 modules)
+- **P3 life polish**: not started
+- **P4 stretch**: not started
+- **Test suite**: 339 unit + 16 integration = **355 green, 0 failed**
 - **Blockers**: none
 
 ---
@@ -23,7 +26,6 @@ is blocked so a reader (or a future session) can pick up where we left off.
 ### P0.1 Learning loop closed
 - `memory/memory_manager.py` injects top-K `learned/*` lessons into every prompt
 - `core/reflection.py` also indexes each new lesson into `vectors` under `source='lessons'`
-- Smoke test: lesson block appears in rendered prompt ✅
 
 ### P0.2 Replanner on step failure
 - `core/tasks.py` adds `replan_count` column (idempotent migration), `cancel_pending_steps`, `next_step_idx`
@@ -33,7 +35,6 @@ is blocked so a reader (or a future session) can pick up where we left off.
 
 ### P0.3 Importance-weighted memory trim
 - `_CATEGORY_WEIGHT` × 30-day recency half-life; two-pass trim keeps `identity` entries safe unless everything else is already gone
-- Smoke test: fresh identity (4.89) > fresh notes (0.98) ✅
 
 ### P0.4 Secrets + memory encryption
 - `core/secrets.py` (new): keyring-first API-key lookup, Fernet key for memory at rest, local 0600 key fallback, `@fernet:v1\n` sentinel
@@ -66,37 +67,48 @@ is blocked so a reader (or a future session) can pick up where we left off.
 - Monthly summary groups by category + currency; budget_status computes `spent / budget / pct / over`; invoice auto-overdue sweep; subscription cost normalises weekly/monthly/yearly to a monthly figure per currency
 - 20/20 unit tests ✅
 
----
-
-## In progress
-
 ### P1.9 Commitment tracking
-- Goal: keyword extractor over the user's utterances and plan steps → commitment row (`memory/commitments.sqlite`), surfaced via proactive and morning briefing
-- Status: not yet started
-- Dependencies: learning loop (done), proactive engine (existing)
+- `core/commitments.py` + `actions/commitments.py`
+- Dedupe on normalised text; snooze/resolve/miss/cancel/sweep lifecycle
+- `extract_from_text` pure-regex extractor: first-person verbs of promise, bare or prepositioned time anchors (today, tomorrow, Friday, by Monday, end of week, 2026-11-10…)
+- Clause splitter handles ", and I…" style multi-commitment utterances
+- 19/19 unit tests ✅
+
+### P2.10 Meeting prep briefing
+- `actions/meeting_prep.py` — deterministic aggregator (no LLM)
+- Pulls from calendar, CRM (tier/last_seen/recent interactions), open follow-ups with attendees, open commitments mentioning attendees, and calendar conflicts around the event window
+- 11/11 unit tests ✅ (`_collect_events` mocked where macOS Calendar would be required)
+
+### P2.11 Report / presentation generator
+- `actions/report_gen.py`
+- Formats: executive_summary, briefing_memo, status_report, presentation_outline, meeting_notes
+- Gemini SMART through `as_json` with strict JSON output; skeleton fallback keeps the required section list even without a key
+- Safe output path sandboxed under `$HOME`; markdown default, optional docx via `python-docx`
+- 9/9 unit tests ✅
+
+### P2.12 Project management
+- `core/projects.py` + `actions/project.py`
+- Projects (lifecycle: planning → active → on_hold → done | cancelled), milestones (pending | done | slipped | cancelled), project_tasks (open | done | blocked | cancelled)
+- `project_summary` returns completion percent, counts by status, next upcoming milestone
+- 16/16 unit tests ✅
+
+### P2.13 Morning briefing formalized
+- `actions/morning_briefing.py` — one-shot aggregator over schedule, commitments, follow-ups, bills, budget, projects, optional inbox-triage (via gatekeeper), optional news (via web_search), optional weather
+- Sections omitted when empty; "Nothing on today. Looking light." fallback
+- Optional `use_model=1` prepends a Gemini-written opening paragraph
+- 10/10 unit tests ✅
 
 ---
 
-## Pending — P2 exec polish
+## Pending — P3 life polish
 
 | ID    | Module                           | Depends on          |
 |-------|----------------------------------|---------------------|
-| P2.10 | Meeting prep briefing            | CRM, calendar, email |
-| P2.11 | Report / presentation generator  | research, file_processor |
-| P2.12 | Project management               | tasks, journal      |
-| P2.13 | Morning briefing formalized      | commitments, calendar, gatekeeper, news |
-
----
-
-## Pending — P3 life polish (further out)
-
-- Hotels / itinerary / timezone / flight-delay monitor
-- Birthday / anniversary reminders (hook CRM)
-- Family calendar / routine manager
-- Session-handle persistence across restarts
-- Bangla TTS integration
-
----
+| P3.14 | Birthday / anniversary reminders | CRM (has birthday field) |
+| P3.15 | Travel itinerary store            | finance, calendar  |
+| P3.16 | Timezone utility                  | — |
+| P3.17 | Session handle persistence         | — |
+| P3.18 | Bangla TTS integration             | core/tts.py        |
 
 ## Pending — P4 stretch
 
@@ -107,24 +119,22 @@ is blocked so a reader (or a future session) can pick up where we left off.
 
 ---
 
-## Known blockers (none active)
+## Test coverage snapshot
 
-- All P1 work to date has been offline + testable; no API-key-blocked work.
-- Encryption smoke test created `config/.memory_key` locally. File removed; `.gitignore` now excludes it.
-
----
-
-## Test coverage (new modules)
-
-| Module        | Unit tests | Status |
-|---------------|-----------:|--------|
-| CRM           | 12         | all pass |
-| Gatekeeper    | 11         | all pass |
-| Decision Sup. | 9          | all pass |
-| Finance       | 20         | all pass |
-| P0.1–P0.4 smoke | 6         | all pass |
-
-Total new tests: 58. All green at commit time.
+| Module             | New tests |
+|--------------------|----------:|
+| CRM                | 12        |
+| Gatekeeper         | 11        |
+| Decision Support   | 9         |
+| Finance            | 20        |
+| Commitments        | 19        |
+| Meeting prep       | 11        |
+| Report generator   | 9         |
+| Projects           | 16        |
+| Morning briefing   | 10        |
+| **New total**      | **117**   |
+| Plus existing user tests + integration | 238 |
+| **Grand total**    | **355 (all green)** |
 
 ---
 
@@ -135,3 +145,4 @@ Total new tests: 58. All green at commit time.
 - No external API called; no payment execution; no email / message sent; no money moved
 - All new persistent stores are per-user sqlite under `memory/` and gitignored
 - Encrypted-at-rest for memory is opt-in-by-presence (keyring OR local 0600 key); plaintext backup preserved on first migration
+- Report generator sandboxes output paths under `$HOME`
