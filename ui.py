@@ -94,28 +94,28 @@ _OS = platform.system()  # "Windows" | "Darwin" | "Linux"
 
 
 class C:
-    # Obsidian / Midnight — premium dark spec
-    BG        = "#0b0f19"
-    PANEL     = "#0f1524"
-    PANEL2    = "#141b2d"
-    BORDER    = "#1a2238"
-    BORDER_B  = "#00e5ff"
-    BORDER_A  = "#26304a"
-    PRI       = "#00e5ff"
-    PRI_DIM   = "#2f6bff"
-    PRI_GHO   = "#0a2434"
-    ACC       = "#ff6b6b"
-    ACC2      = "#ffb84e"
-    GREEN     = "#4effb4"
-    GREEN_D   = "#35c98f"
-    RED       = "#ff6b6b"
-    MUTED_C   = "#ff9a9a"
-    TEXT      = "#e6eaf2"
-    TEXT_DIM  = "#7b8299"
-    TEXT_MED  = "#9aa3b7"
+    # Obsidian / Command Center — matches dashboard/static/app.html exactly
+    BG        = "#05070d"   # deep obsidian base
+    PANEL     = "#0a0f1c"   # glass panel ground
+    PANEL2    = "#0f1627"   # elevated card
+    BORDER    = "#141c33"   # subtle divider
+    BORDER_B  = "#00e5ff"   # luminous cyan edge (hover / active)
+    BORDER_A  = "#1a2340"   # ambient divider (slightly warmer than BORDER)
+    PRI       = "#00e5ff"   # cyan primary
+    PRI_DIM   = "#3d7eff"   # electric blue pair
+    PRI_GHO   = "#0a2434"   # ghosted-cyan background for chips
+    ACC       = "#ff6b6b"   # crimson alert
+    ACC2      = "#ffb84e"   # amber warn
+    GREEN     = "#40e39f"   # mint ok
+    GREEN_D   = "#32bf7f"   # mint deep
+    RED       = "#ff6b6b"   # crimson
+    MUTED_C   = "#ff9a9a"   # muted crimson
+    TEXT      = "#e8ecf4"   # ink
+    TEXT_DIM  = "#5f6a82"   # ink dim
+    TEXT_MED  = "#9aa3b7"   # ink med
     WHITE     = "#ffffff"
-    DARK      = "#08111c"
-    BAR_BG    = "#141b2d"
+    DARK      = "#030509"   # near-black backdrop
+    BAR_BG    = "#141c33"   # metric bar track
 
 
 def _sans_family() -> str:
@@ -3361,6 +3361,51 @@ class RemoteKeyOverlay(QWidget):
         self.closed.emit()
 
 
+class _AmbientCanvas(QWidget):
+    """Central widget that paints the command-center ambient — twin radial
+    glows + faint grid — matching dashboard/static/app.html exactly. Replaces
+    the flat QWidget background so Qt feels like the web dashboard, not a
+    generic dark app."""
+
+    def paintEvent(self, ev):  # noqa: N802
+        p = QPainter(self)
+        try:
+            p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            w = self.width(); h = self.height()
+
+            # Base fill
+            p.fillRect(self.rect(), qcol(C.BG))
+
+            # Radial glow 1 — cyan, top-left
+            g1 = QRadialGradient(w * 0.08, -h * 0.10, max(w, h) * 0.85)
+            g1.setColorAt(0.0, QColor(0, 229, 255, 36))
+            g1.setColorAt(0.6, QColor(0, 229, 255, 0))
+            p.fillRect(self.rect(), g1)
+
+            # Radial glow 2 — electric blue, bottom-right
+            g2 = QRadialGradient(w * 0.92, h * 1.10, max(w, h) * 0.95)
+            g2.setColorAt(0.0, QColor(47, 107, 255, 44))
+            g2.setColorAt(0.6, QColor(47, 107, 255, 0))
+            p.fillRect(self.rect(), g2)
+
+            # Faint grid — only through a center ellipse mask (prevents flat look)
+            p.setPen(QColor(255, 255, 255, 10))
+            step = 44
+            cx, cy = w // 2, h // 2
+            rx, ry = int(w * 0.55), int(h * 0.55)
+            for x in range(0, w, step):
+                # keep lines inside an elliptical "window" so corners stay clean
+                dx = (x - cx) / max(1, rx)
+                if abs(dx) < 1:
+                    p.drawLine(x, 0, x, h)
+            for y in range(0, h, step):
+                dy = (y - cy) / max(1, ry)
+                if abs(dy) < 1:
+                    p.drawLine(0, y, w, y)
+        finally:
+            p.end()
+
+
 class MainWindow(QMainWindow):
     _log_sig        = pyqtSignal(str)
     _state_sig      = pyqtSignal(str)
@@ -3434,7 +3479,7 @@ class MainWindow(QMainWindow):
         self._remote_overlay: RemoteKeyOverlay | None = None
         self._customize_overlay: CustomizeOverlay | None = None
 
-        central = QWidget()
+        central = _AmbientCanvas()
         central.setStyleSheet(f"background: {C.BG};")
         self.setCentralWidget(central)
 
@@ -4373,8 +4418,8 @@ class MainWindow(QMainWindow):
         w = QWidget()
         w.setFixedHeight(60)
         w.setStyleSheet(
-            f"background: rgba(255,255,255,4); "
-            f"border-bottom: 1px solid rgba(255,255,255,18);"
+            f"background: rgba(10,16,28,180); "
+            f"border-bottom: 1px solid rgba(0,229,255,22);"
         )
         lay = QHBoxLayout(w)
         lay.setContentsMargins(20, 0, 20, 0)
@@ -4610,8 +4655,8 @@ class MainWindow(QMainWindow):
         w = QWidget()
         w.setFixedWidth(_LEFT_W)
         w.setStyleSheet(
-            f"background: rgba(255,255,255,4); "
-            f"border-right: 1px solid rgba(255,255,255,12);"
+            f"background: rgba(10,16,28,170); "
+            f"border-right: 1px solid rgba(0,229,255,20);"
         )
         outer = QHBoxLayout(w)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -4684,8 +4729,8 @@ class MainWindow(QMainWindow):
         # SYS card — one glass container with all metric bars inside
         sys_card = QWidget()
         sys_card.setStyleSheet(
-            f"background: rgba(255,255,255,6); "
-            f"border: 1px solid rgba(255,255,255,14); border-radius: 14px;"
+            f"background: rgba(255,255,255,10); "
+            f"border: 1px solid rgba(255,255,255,22); border-radius: 18px;"
         )
         sys_lay = QVBoxLayout(sys_card)
         sys_lay.setContentsMargins(12, 10, 12, 10)
@@ -4793,8 +4838,8 @@ class MainWindow(QMainWindow):
         w = QWidget()
         w.setFixedWidth(_RIGHT_W)
         w.setStyleSheet(
-            f"background: rgba(255,255,255,4); "
-            f"border-left: 1px solid rgba(255,255,255,12);"
+            f"background: rgba(10,16,28,170); "
+            f"border-left: 1px solid rgba(0,229,255,20);"
         )
         lay = QVBoxLayout(w)
         lay.setContentsMargins(14, 16, 14, 16)
@@ -5663,7 +5708,7 @@ class MainWindow(QMainWindow):
     def _build_footer(self) -> QWidget:
         w = QWidget()
         w.setFixedHeight(22)
-        w.setStyleSheet(f"background: {C.DARK}; border-top: 1px solid {C.BORDER};")
+        w.setStyleSheet(f"background: rgba(5,8,16,220); border-top: 1px solid rgba(0,229,255,18);")
         lay = QHBoxLayout(w); lay.setContentsMargins(14, 0, 14, 0)
 
         def _fl(txt, color=C.TEXT_MED):

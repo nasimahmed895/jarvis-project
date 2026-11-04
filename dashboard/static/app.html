@@ -1,559 +1,2352 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>JARVIS Dashboard</title>
-  <script src="/static/crypto.js"></script>
-  <style>
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-    :root {
-      --bg:      #07090f;
-      --surface: rgba(255,255,255,0.04);
-      --border:  rgba(255,255,255,0.07);
-      --accent:  #6366f1;
-      --adim:    rgba(99,102,241,0.14);
-      --text:    #dde3ed;
-      --muted:   #5e6a7e;
-      --green:   #22c55e;
-      --gdim:    rgba(34,197,94,0.14);
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="color-scheme" content="dark" />
+<title>JARVIS — Command Center</title>
+<script src="/static/crypto.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Space+Grotesk:wght@500;600;700&family=Orbitron:wght@500;600;700;900&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+tailwind.config = {
+  theme: {
+    extend: {
+      colors: {
+        obsidian:'#05070d',    void:'#030509',       onyx:'#0A0F1C',
+        graphite:'#0F1627',    slate1:'#141C33',     slate2:'#1A2340',
+        cyan1:'#00E5FF',       cyan2:'#3D7EFF',      violet:'#8B6BFF',
+        mint:'#40E39F',        amber:'#FFB84E',      crimson:'#FF6B6B',
+        ink:'#E8ECF4',         inkmed:'#9AA3B7',     inkdim:'#5F6A82',
+      },
+      fontFamily: {
+        sans:['Inter','ui-sans-serif','system-ui'],
+        display:['Space Grotesk','Inter','sans-serif'],
+        head:['Orbitron','Space Grotesk','sans-serif'],
+        mono:['JetBrains Mono','ui-monospace','monospace'],
+      },
+      boxShadow: {
+        card:'0 24px 70px -28px rgba(0,0,0,.75), inset 0 1px 0 rgba(255,255,255,.04)',
+        glow:'0 0 40px rgba(0,229,255,.28)',
+        innerGlow:'inset 0 0 40px rgba(0,229,255,.12)',
+      },
     }
-    html, body {
-      height: 100%; background: var(--bg); color: var(--text);
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-      display: flex; flex-direction: column; overflow: hidden;
-    }
+  }
+}
+</script>
+<style>
+  :root{
+    --obsidian:#05070d; --void:#030509; --onyx:#0A0F1C;
+    --cyan1:#00E5FF; --cyan2:#3D7EFF; --violet:#8B6BFF;
+    --mint:#40E39F; --amber:#FFB84E; --crimson:#FF6B6B;
+    --ink:#E8ECF4; --inkmed:#9AA3B7; --inkdim:#5F6A82;
+    --line:rgba(255,255,255,.06); --line2:rgba(255,255,255,.10);
+  }
+  *,::before,::after{-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;box-sizing:border-box}
+  html,body{background:var(--obsidian);color:var(--ink);height:100%;margin:0}
+  body{overflow:hidden;font-family:Inter,ui-sans-serif,system-ui}
+  button{font-family:inherit}
 
-    /* ── HEADER ── */
-    header {
-      flex-shrink: 0; display: flex; align-items: center; gap: 10px;
-      padding: 12px 16px; border-bottom: 1px solid var(--border);
-      background: rgba(7,9,15,0.95);
-    }
-    .logo { font-size: 15px; font-weight: 700; letter-spacing: 6px; }
-    .logo em { color: var(--accent); font-style: normal; }
-    .pill {
-      display: flex; align-items: center; gap: 6px; padding: 4px 11px;
-      border-radius: 99px; background: var(--surface); border: 1px solid var(--border);
-      font-size: 10px; font-weight: 700; letter-spacing: 1.5px; text-transform: uppercase;
-      color: var(--muted); transition: all 0.3s;
-    }
-    .pill.on { background: var(--gdim); border-color: rgba(34,197,94,0.3); color: var(--green); }
-    .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); transition: background 0.3s; }
-    .pill.on .dot { background: var(--green); animation: blink 2s infinite; }
-    @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.4} }
-    .spacer { flex: 1; }
-    .enc-badge {
-      font-size: 9px; font-weight: 700; letter-spacing: 1.5px; padding: 3px 8px;
-      border-radius: 4px; display: none;
-    }
-    .enc-badge.on  { display: block; background: rgba(34,197,94,0.1); border: 1px solid rgba(34,197,94,0.25); color: var(--green); }
-    .enc-badge.off { display: block; background: rgba(255,100,100,0.08); border: 1px solid rgba(255,100,100,0.2); color: #f87171; }
-    .url { font-size: 10px; font-family: monospace; color: var(--muted); padding: 4px 9px; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; }
+  /* ambient background stack */
+  .bg-base{
+    position:fixed;inset:0;z-index:0;pointer-events:none;
+    background:
+      radial-gradient(1400px 820px at 10% -10%, rgba(0,229,255,.085) 0, transparent 55%),
+      radial-gradient(1500px 900px at 95% 110%, rgba(61,126,255,.11) 0, transparent 58%),
+      radial-gradient(900px 600px at 50% 50%, rgba(139,107,255,.04) 0, transparent 65%),
+      linear-gradient(180deg,#05070d 0%,#03040a 100%);
+  }
+  .bg-grid{
+    position:fixed;inset:0;pointer-events:none;z-index:0;opacity:.32;
+    background-image:
+      linear-gradient(rgba(255,255,255,.028) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255,255,255,.028) 1px, transparent 1px);
+    background-size:48px 48px;
+    mask-image:radial-gradient(ellipse at center, black 28%, transparent 82%);
+  }
+  .bg-aurora{
+    position:fixed;inset:-20%;z-index:0;pointer-events:none;
+    background:
+      radial-gradient(45% 55% at 20% 30%, rgba(0,229,255,.12) 0, transparent 70%),
+      radial-gradient(40% 50% at 85% 70%, rgba(139,107,255,.10) 0, transparent 70%),
+      radial-gradient(35% 45% at 60% 20%, rgba(61,126,255,.09) 0, transparent 70%);
+    filter:blur(40px);
+    animation:auroraDrift 42s ease-in-out infinite alternate;
+    opacity:.6;
+  }
+  @keyframes auroraDrift{
+    0%{transform:translate(0,0) rotate(0deg) scale(1)}
+    50%{transform:translate(-4%,2%) rotate(3deg) scale(1.08)}
+    100%{transform:translate(3%,-3%) rotate(-2deg) scale(1.05)}
+  }
+  .bg-scan{
+    position:fixed;inset:0;pointer-events:none;z-index:0;opacity:.04;
+    background:repeating-linear-gradient(0deg, rgba(255,255,255,.3) 0 1px, transparent 1px 3px);
+    mix-blend-mode:overlay;
+  }
+  .stars{position:fixed;inset:0;z-index:0;pointer-events:none;opacity:.5}
+  .stars svg{width:100%;height:100%}
 
-    /* ── FEED ── */
-    main { flex: 1; overflow-y: auto; padding: 14px 16px 8px; display: flex; flex-direction: column; gap: 10px; }
-    main::-webkit-scrollbar { width: 3px; }
-    main::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
-    .msg { max-width: 82%; padding: 10px 14px; border-radius: 14px; font-size: 14px; line-height: 1.55; animation: pop 0.18s ease; }
-    @keyframes pop { from { opacity:0; transform:translateY(4px); } }
-    .msg-j   { align-self:flex-start; background:var(--adim);   border:1px solid rgba(99,102,241,0.18); border-bottom-left-radius:4px; }
-    .msg-u   { align-self:flex-end;   background:var(--surface); border:1px solid var(--border);        border-bottom-right-radius:4px; }
-    .msg-sys { align-self:center; font-size:11px; color:var(--muted); padding:2px 0; background:transparent; border:none; letter-spacing:0.3px; }
-    .lbl { font-size:9px; font-weight:700; letter-spacing:2px; text-transform:uppercase; opacity:0.45; margin-bottom:4px; }
-    .msg-j .lbl { color:var(--accent); }
-    .msg-u .lbl { color:var(--muted); text-align:right; }
+  /* glass surfaces */
+  .glass{
+    background:linear-gradient(180deg, rgba(255,255,255,.045) 0%, rgba(255,255,255,.015) 100%);
+    border:1px solid var(--line);
+    backdrop-filter:blur(22px) saturate(140%); -webkit-backdrop-filter:blur(22px) saturate(140%);
+    box-shadow:0 24px 70px -28px rgba(0,0,0,.72), inset 0 1px 0 rgba(255,255,255,.05);
+    position:relative;
+  }
+  .glass::after{
+    content:'';position:absolute;inset:0;border-radius:inherit;pointer-events:none;
+    background:linear-gradient(180deg,rgba(255,255,255,.055) 0%, transparent 25%, transparent 100%);
+    mask:linear-gradient(180deg,#000 0%, #000 20%, transparent 70%);
+    opacity:.6;
+  }
+  .glass-hv{transition:border-color .22s ease, box-shadow .22s ease, transform .22s cubic-bezier(.19,1,.22,1)}
+  .glass-hv:hover{
+    border-color:rgba(0,229,255,.32);
+    box-shadow:0 28px 80px -22px rgba(0,0,0,.72), 0 0 0 1px rgba(0,229,255,.1), 0 0 36px rgba(0,229,255,.12), inset 0 1px 0 rgba(255,255,255,.08);
+  }
 
-    /* ── FILE CARD ── */
-    .msg-file {
-      align-self: flex-end;
-      background: var(--surface); border: 1px solid var(--border);
-      border-radius: 14px; border-bottom-right-radius: 4px;
-      padding: 11px 14px; display: flex; align-items: center; gap: 12px;
-      max-width: 82%; animation: pop 0.18s ease;
-    }
-    .fc-icon { font-size: 26px; flex-shrink: 0; }
-    .fc-meta { flex: 1; min-width: 0; }
-    .fc-lbl  { font-size:9px; font-weight:700; letter-spacing:2px; text-transform:uppercase; opacity:0.45; color:var(--muted); margin-bottom:4px; }
-    .fc-name { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .fc-size { font-size: 11px; color: var(--muted); margin-top: 2px; }
-    .fc-bar-wrap { height: 3px; background: var(--border); border-radius: 2px; margin-top: 7px; overflow: hidden; }
-    .fc-bar { height: 100%; width: 0%; background: var(--accent); border-radius: 2px; transition: width 0.12s linear; }
-    .fc-status { font-size: 10px; font-weight: 700; letter-spacing: 1px; flex-shrink: 0; color: var(--muted); }
-    .fc-status.done { color: var(--green); }
-    .fc-status.err  { color: #f87171; }
-    .fc-dl { display:block; margin-top:6px; font-size:11px; color:var(--accent); text-decoration:none; font-weight:600; }
-    .fc-dl:hover { opacity: 0.8; }
+  .stroke-cy{position:relative}
+  .stroke-cy::before{
+    content:'';position:absolute;inset:0;border-radius:inherit;padding:1px;
+    background:linear-gradient(135deg, rgba(0,229,255,.55) 0%, rgba(61,126,255,.32) 45%, rgba(139,107,255,.18) 75%, rgba(255,255,255,.04) 100%);
+    -webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);
+            mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);
+    -webkit-mask-composite:xor; mask-composite:exclude; pointer-events:none;
+  }
 
-    /* ── FOOTER ── */
-    footer { flex-shrink:0; padding:10px 14px; border-top:1px solid var(--border); background:rgba(7,9,15,0.95); display:flex; gap:8px; align-items:center; }
-    #inp { flex:1; padding:11px 14px; background:var(--surface); border:1.5px solid var(--border); border-radius:12px; color:var(--text); font-size:14px; outline:none; transition:border-color 0.15s; }
-    #inp:focus { border-color: var(--accent); }
-    #inp::placeholder { color: var(--muted); }
-    .btn { padding:11px 15px; border:none; border-radius:12px; font-size:11px; font-weight:700; letter-spacing:1.5px; cursor:pointer; transition:opacity 0.15s,transform 0.1s; }
-    .btn:active { transform: scale(0.96); }
-    .btn:hover  { opacity: 0.82; }
-    .btn-send { background: var(--accent); color: #fff; }
-    .btn-wake { background:var(--surface); border:1px solid var(--border); color:var(--muted); display:none; }
-    .btn-wake.show { display:block; color:var(--green); border-color:rgba(34,197,94,0.35); }
-    .btn-attach {
-      background: var(--surface); border: 1px solid var(--border); color: var(--muted);
-      padding: 11px 13px; font-size: 16px; line-height: 1; border-radius: 12px;
-      cursor: pointer; transition: opacity 0.15s, transform 0.1s; display: flex;
-      align-items: center; justify-content: center; flex-shrink: 0;
-    }
-    .btn-attach:hover  { opacity: 0.82; border-color: var(--accent); color: var(--accent); }
-    .btn-attach:active { transform: scale(0.96); }
+  /* sidebar */
+  .sidebar{width:260px;transition:width .34s cubic-bezier(.19,1,.22,1);background:linear-gradient(180deg,rgba(10,15,28,.72) 0%, rgba(5,7,13,.72) 100%)}
+  .sidebar.collapsed{width:78px}
+  .sidebar.collapsed .lbl-txt,.sidebar.collapsed .brand-word,.sidebar.collapsed .profile-meta,.sidebar.collapsed .eyebrow,.sidebar.collapsed .sidebar-search,.sidebar.collapsed .nav-badge{opacity:0;pointer-events:none}
+  .rail-btn{position:relative;transition:color .18s ease, background .18s ease, transform .15s ease;border-radius:12px}
+  .rail-btn::before{content:'';position:absolute;left:-10px;top:10px;bottom:10px;width:3px;border-radius:2px;background:linear-gradient(180deg,var(--cyan1),var(--cyan2));opacity:0;transition:opacity .18s ease;box-shadow:0 0 8px rgba(0,229,255,.6)}
+  .rail-btn:hover{color:var(--ink);background:rgba(255,255,255,.04)}
+  .rail-btn.active{color:var(--ink);background:linear-gradient(90deg, rgba(0,229,255,.1) 0%, rgba(0,229,255,.02) 100%)}
+  .rail-btn.active::before{opacity:1}
+  .rail-btn.active svg{filter:drop-shadow(0 0 6px rgba(0,229,255,.55));color:var(--cyan1)}
 
-    /* ── MIC BUTTON ── */
-    #mic-btn {
-      background: var(--surface); border: 1px solid var(--border); color: var(--muted);
-      padding: 11px 13px; font-size: 16px; line-height: 1; border-radius: 12px;
-      cursor: pointer; transition: opacity 0.15s, transform 0.1s, background 0.2s, border-color 0.2s;
-      display: flex; align-items: center; justify-content: center; flex-shrink: 0;
-    }
-    #mic-btn:hover  { opacity: 0.82; border-color: var(--accent); color: var(--accent); }
-    #mic-btn:active { transform: scale(0.96); }
-    #mic-btn.recording {
-      background: rgba(239,68,68,0.15); border-color: rgba(239,68,68,0.45); color: #ef4444;
-      animation: mic-pulse 1s ease-in-out infinite;
-    }
-    #mic-btn.unsupported { opacity: 0.3; cursor: not-allowed; }
-    @keyframes mic-pulse { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:0.65;transform:scale(0.97)} }
+  /* buttons */
+  .btn-cyan{
+    background:linear-gradient(135deg,var(--cyan1) 0%, var(--cyan2) 100%);
+    color:#041018;border:none;
+    box-shadow:0 8px 28px -8px rgba(0,229,255,.55), inset 0 1px 0 rgba(255,255,255,.3);
+    transition:transform .15s ease, box-shadow .2s ease, filter .18s ease;
+    font-weight:700;letter-spacing:.06em;
+  }
+  .btn-cyan:hover{filter:brightness(1.08);transform:translateY(-1px);box-shadow:0 12px 32px -8px rgba(0,229,255,.7), inset 0 1px 0 rgba(255,255,255,.35)}
+  .btn-cyan:active{transform:translateY(0);filter:brightness(.95)}
+  .btn-ghost{
+    background:rgba(255,255,255,.035); border:1px solid var(--line2); color:var(--inkmed);
+    transition:all .18s ease;
+  }
+  .btn-ghost:hover{color:var(--ink);border-color:rgba(0,229,255,.38);background:rgba(0,229,255,.06);box-shadow:inset 0 0 20px rgba(0,229,255,.05)}
 
-    /* ── TOAST ── */
-    #toast {
-      position:fixed; top:66px; left:50%; transform:translateX(-50%) translateY(-8px);
-      background:rgba(34,197,94,0.16); border:1px solid rgba(34,197,94,0.4);
-      color:var(--green); font-size:12px; font-weight:700; letter-spacing:1px;
-      padding:7px 18px; border-radius:99px;
-      opacity:0; transition:opacity 0.22s,transform 0.22s;
-      pointer-events:none; white-space:nowrap;
-    }
-    #toast.show { opacity:1; transform:translateX(-50%) translateY(0); }
-  </style>
+  /* inputs */
+  .glow-input{background:rgba(255,255,255,.032);border:1px solid var(--line2);transition:all .18s ease;color:var(--ink);font-family:inherit}
+  .glow-input:focus{border-color:rgba(0,229,255,.55);box-shadow:0 0 0 3px rgba(0,229,255,.1), 0 0 24px rgba(0,229,255,.12); background:rgba(255,255,255,.06); outline:none}
+  .glow-input::placeholder{color:var(--inkdim)}
+
+  /* status dots / pulses */
+  .dot{width:8px;height:8px;border-radius:9999px;display:inline-block;position:relative}
+  .dot.mint{background:var(--mint);box-shadow:0 0 10px rgba(64,227,159,.8)}
+  .dot.amber{background:var(--amber);box-shadow:0 0 10px rgba(255,184,78,.7)}
+  .dot.crimson{background:var(--crimson);box-shadow:0 0 10px rgba(255,107,107,.7)}
+  .dot.cyan{background:var(--cyan1);box-shadow:0 0 10px rgba(0,229,255,.8)}
+  .dot.idle{background:var(--inkdim)}
+  .dot.pulse::after{content:'';position:absolute;inset:-5px;border-radius:9999px;border:1.5px solid currentColor;opacity:0;animation:dotPulse 2s ease-out infinite;color:inherit}
+  @keyframes dotPulse{0%{transform:scale(.4);opacity:.7}100%{transform:scale(2.4);opacity:0}}
+
+  /* AI core rings */
+  .core-ring{position:absolute;inset:0;border-radius:9999px;border:1px solid rgba(0,229,255,.5);pointer-events:none}
+  @keyframes pulseRing{
+    0%{transform:scale(.68);opacity:.95}
+    80%{transform:scale(2.6);opacity:0}
+    100%{transform:scale(2.6);opacity:0}
+  }
+  .core-ring.r1{animation:pulseRing 3.4s cubic-bezier(.19,1,.22,1) infinite}
+  .core-ring.r2{animation:pulseRing 3.4s cubic-bezier(.19,1,.22,1) .55s infinite}
+  .core-ring.r3{animation:pulseRing 3.4s cubic-bezier(.19,1,.22,1) 1.1s infinite}
+  .core-ring.slow{animation-duration:5s;border-color:rgba(255,184,78,.4)}
+
+  /* orbital particles */
+  .orbit{position:absolute;inset:0;animation:spin 18s linear infinite;pointer-events:none}
+  .orbit.rev{animation-direction:reverse;animation-duration:26s}
+  .orbit .particle{position:absolute;width:5px;height:5px;background:var(--cyan1);border-radius:50%;box-shadow:0 0 10px rgba(0,229,255,.9);top:50%;left:-2.5px;margin-top:-2.5px}
+  @keyframes spin{to{transform:rotate(360deg)}}
+
+  /* eq bars */
+  .eq-bar{display:inline-block;width:3px;margin:0 2px;background:linear-gradient(180deg,var(--cyan1),var(--cyan2));border-radius:3px;transform-origin:50% 100%;animation:barBounce 1.2s ease-in-out infinite;box-shadow:0 0 6px rgba(0,229,255,.55)}
+  @keyframes barBounce{0%,100%{transform:scaleY(.26)}50%{transform:scaleY(1)}}
+
+  /* progress */
+  .bar-track{height:5px;background:rgba(255,255,255,.055);border-radius:4px;overflow:hidden;position:relative;border:1px solid rgba(255,255,255,.03)}
+  .bar-fill{height:100%;background:linear-gradient(90deg,var(--cyan1),var(--cyan2));box-shadow:0 0 12px rgba(0,229,255,.5);position:relative;overflow:hidden;border-radius:4px}
+  .bar-fill.mint{background:linear-gradient(90deg,var(--mint),#32bf7f);box-shadow:0 0 12px rgba(64,227,159,.45)}
+  .bar-fill.amber{background:linear-gradient(90deg,var(--amber),#FF8E3C);box-shadow:0 0 12px rgba(255,184,78,.45)}
+  .bar-fill.crimson{background:linear-gradient(90deg,var(--crimson),#d94f4f);box-shadow:0 0 12px rgba(255,107,107,.45)}
+  .bar-fill::after{content:'';position:absolute;inset:0;background:linear-gradient(90deg,transparent 0%, rgba(255,255,255,.3) 50%, transparent 100%);background-size:200% 100%;animation:shimmer 2.6s linear infinite}
+  @keyframes shimmer{0%{background-position:-200% 0}100%{background-position:200% 0}}
+
+  /* scrollbars */
+  .scroll::-webkit-scrollbar{width:7px;height:7px}
+  .scroll::-webkit-scrollbar-thumb{background:rgba(255,255,255,.12);border-radius:4px}
+  .scroll::-webkit-scrollbar-thumb:hover{background:rgba(0,229,255,.32)}
+  .scroll::-webkit-scrollbar-track{background:transparent}
+
+  /* typography helpers */
+  .eyebrow{text-transform:uppercase;letter-spacing:.16em;font-weight:700;color:var(--inkdim);font-size:10px}
+  .page-title{font-family:'Space Grotesk',Inter,sans-serif;font-weight:700;font-size:26px;letter-spacing:-.02em;line-height:1.15}
+  .mono{font-family:'JetBrains Mono',ui-monospace,monospace}
+
+  /* chips */
+  .chip{display:inline-flex;align-items:center;gap:6px;padding:3px 10px;font-size:11px;font-weight:600;letter-spacing:.05em;border-radius:999px;border:1px solid var(--line2);background:rgba(255,255,255,.035);color:var(--inkmed);white-space:nowrap}
+  .chip.cyan{color:var(--cyan1);border-color:rgba(0,229,255,.32);background:rgba(0,229,255,.08)}
+  .chip.mint{color:var(--mint);border-color:rgba(64,227,159,.32);background:rgba(64,227,159,.08)}
+  .chip.amber{color:var(--amber);border-color:rgba(255,184,78,.32);background:rgba(255,184,78,.08)}
+  .chip.crimson{color:var(--crimson);border-color:rgba(255,107,107,.32);background:rgba(255,107,107,.08)}
+  .chip.violet{color:var(--violet);border-color:rgba(139,107,255,.32);background:rgba(139,107,255,.08)}
+
+  /* chat bubbles */
+  .msg{max-width:84%;padding:12px 16px;border-radius:14px;font-size:14px;line-height:1.56;animation:pop .22s cubic-bezier(.19,1,.22,1) both;word-wrap:break-word}
+  @keyframes pop{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:translateY(0)}}
+  .msg-j{align-self:flex-start;background:linear-gradient(180deg,rgba(0,229,255,.08),rgba(0,229,255,.03));border:1px solid rgba(0,229,255,.22);border-bottom-left-radius:4px;box-shadow:0 0 24px -8px rgba(0,229,255,.2)}
+  .msg-u{align-self:flex-end;background:rgba(255,255,255,.05);border:1px solid var(--line2);border-bottom-right-radius:4px}
+  .msg-sys{align-self:center;font-size:11px;color:var(--inkdim);background:transparent;border:none;letter-spacing:.3px;padding:3px 0;max-width:100%;text-align:center;font-family:'JetBrains Mono',monospace}
+  .lbl{font-size:9px;font-weight:700;letter-spacing:2px;text-transform:uppercase;opacity:.7;margin-bottom:5px}
+  .msg-j .lbl{color:var(--cyan1)}
+  .msg-u .lbl{color:var(--inkmed);text-align:right}
+
+  /* file card */
+  .msg-file{align-self:flex-end;background:rgba(255,255,255,.04);border:1px solid var(--line2);border-radius:14px;border-bottom-right-radius:4px;padding:12px 15px;display:flex;align-items:center;gap:13px;max-width:84%;animation:pop .22s cubic-bezier(.19,1,.22,1) both}
+  .fc-icon{font-size:28px;flex-shrink:0;line-height:1}
+  .fc-meta{flex:1;min-width:0}
+  .fc-name{font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .fc-size{font-size:11px;color:var(--inkdim);margin-top:2px}
+  .fc-bar-wrap{height:3px;background:rgba(255,255,255,.08);border-radius:2px;margin-top:8px;overflow:hidden}
+  .fc-bar{height:100%;width:0%;background:var(--cyan1);border-radius:2px;transition:width .12s linear}
+  .fc-status{font-size:10px;font-weight:700;letter-spacing:1px;color:var(--inkmed);flex-shrink:0}
+  .fc-status.done{color:var(--mint)}
+  .fc-status.err{color:var(--crimson)}
+  .fc-dl{display:inline-block;margin-top:6px;font-size:11px;color:var(--cyan1);text-decoration:none;font-weight:600}
+  .fc-dl:hover{opacity:.82}
+
+  /* toast */
+  #toast{position:fixed;top:72px;left:50%;transform:translate(-50%,-8px);background:rgba(64,227,159,.14);border:1px solid rgba(64,227,159,.4);color:var(--mint);font-size:12px;font-weight:700;letter-spacing:1px;padding:9px 22px;border-radius:99px;opacity:0;transition:opacity .25s, transform .25s;pointer-events:none;white-space:nowrap;z-index:50;backdrop-filter:blur(12px)}
+  #toast.show{opacity:1;transform:translate(-50%,0)}
+  #toast.err{background:rgba(255,107,107,.14);border-color:rgba(255,107,107,.4);color:var(--crimson)}
+
+  /* recording pulse */
+  .recording{animation:micPulse 1.1s ease-in-out infinite}
+  @keyframes micPulse{0%,100%{opacity:1;transform:scale(1);box-shadow:inset 0 0 30px rgba(255,107,107,.3), 0 0 44px rgba(255,107,107,.3)}50%{opacity:.7;transform:scale(.97);box-shadow:inset 0 0 30px rgba(255,107,107,.5), 0 0 60px rgba(255,107,107,.45)}}
+
+  /* fade-up on view switch */
+  .fade-up{animation:fadeUp .38s cubic-bezier(.19,1,.22,1) both}
+  @keyframes fadeUp{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+  .stagger > *{animation:fadeUp .4s cubic-bezier(.19,1,.22,1) both}
+  .stagger > *:nth-child(1){animation-delay:.03s}
+  .stagger > *:nth-child(2){animation-delay:.08s}
+  .stagger > *:nth-child(3){animation-delay:.13s}
+  .stagger > *:nth-child(4){animation-delay:.18s}
+  .stagger > *:nth-child(5){animation-delay:.23s}
+  .stagger > *:nth-child(6){animation-delay:.28s}
+  .stagger > *:nth-child(7){animation-delay:.33s}
+  .stagger > *:nth-child(8){animation-delay:.38s}
+
+  /* responsive */
+  .scrim{position:fixed;inset:0;background:rgba(0,0,0,.6);backdrop-filter:blur(3px);z-index:39;display:none}
+  .scrim.show{display:block}
+  @media (max-width: 900px){
+    .sidebar{position:fixed !important;top:0;left:0;bottom:0;z-index:40;transform:translateX(-100%);width:270px !important}
+    .sidebar.open{transform:translateX(0)}
+    .sidebar .lbl-txt,.sidebar .brand-word,.sidebar .profile-meta,.sidebar .eyebrow,.sidebar .sidebar-search,.sidebar .nav-badge{opacity:1 !important;pointer-events:auto !important}
+  }
+
+  /* empty state */
+  .empty{padding:48px 20px;text-align:center;color:var(--inkdim);font-size:13px}
+  .empty svg{margin:0 auto 10px;display:block;opacity:.4}
+
+  /* data table */
+  table.data-table{width:100%;font-size:13px;border-collapse:collapse}
+  table.data-table th{text-align:left;padding:12px 14px;color:var(--inkdim);font-weight:700;letter-spacing:.08em;text-transform:uppercase;font-size:10px;border-bottom:1px solid var(--line);background:rgba(255,255,255,.015)}
+  table.data-table td{padding:13px 14px;border-bottom:1px solid var(--line);color:var(--ink);vertical-align:top}
+  table.data-table tr:last-child td{border-bottom:none}
+  table.data-table tr:hover td{background:rgba(255,255,255,.022)}
+
+  /* nav badge */
+  .nav-badge{min-width:18px;height:18px;padding:0 5px;border-radius:9px;background:rgba(0,229,255,.1);border:1px solid rgba(0,229,255,.28);color:var(--cyan1);font-size:10px;font-weight:700;display:inline-flex;align-items:center;justify-content:center;margin-left:auto;transition:opacity .2s}
+
+  /* holographic card variant */
+  .holo{position:relative;overflow:hidden}
+  .holo::before{content:'';position:absolute;inset:-50%;background:conic-gradient(from 0deg, transparent 0%, rgba(0,229,255,.1) 20%, transparent 40%, rgba(139,107,255,.08) 70%, transparent 90%);animation:holoSpin 12s linear infinite;pointer-events:none;opacity:.5}
+  @keyframes holoSpin{to{transform:rotate(360deg)}}
+
+  /* sparkline container */
+  .spark{width:100%;height:28px;display:block}
+
+  /* donut */
+  .donut-wrap{position:relative;width:170px;height:170px;margin:0 auto}
+  .donut-wrap .label{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center}
+
+  /* kanban columns */
+  .kanban-col{min-height:180px;border-radius:14px;padding:14px;background:rgba(255,255,255,.018);border:1px solid var(--line)}
+  .kanban-col.hot{border-color:rgba(0,229,255,.25);background:rgba(0,229,255,.03)}
+
+  /* search palette dropdown (inline suggestions) */
+  .palette-drop{position:absolute;left:0;right:0;top:calc(100% + 6px);background:rgba(10,15,28,.96);backdrop-filter:blur(18px);border:1px solid var(--line2);border-radius:12px;padding:6px;box-shadow:0 20px 50px -20px rgba(0,0,0,.8);z-index:45;display:none;max-height:300px;overflow-y:auto}
+  .palette-drop.show{display:block}
+  .palette-item{padding:8px 10px;border-radius:8px;cursor:pointer;display:flex;align-items:center;gap:10px;font-size:13px;color:var(--inkmed)}
+  .palette-item:hover,.palette-item.sel{background:rgba(0,229,255,.1);color:var(--ink)}
+
+  /* small timeline bullet */
+  .tl-dot{position:relative;width:9px;height:9px;border-radius:50%;flex-shrink:0;margin-top:5px}
+  .tl-dot::after{content:'';position:absolute;top:9px;left:4px;width:1px;height:calc(100% + 12px);background:var(--line);opacity:.6}
+  .tl-row:last-child .tl-dot::after{display:none}
+
+  /* ring progress svg helper */
+  .ring-progress{transform:rotate(-90deg)}
+  .ring-progress circle{fill:none;stroke-width:6}
+  .ring-progress .track{stroke:rgba(255,255,255,.08)}
+  .ring-progress .fill{stroke:url(#ringGradient);stroke-linecap:round;transition:stroke-dashoffset .6s cubic-bezier(.19,1,.22,1)}
+
+  /* subtle noise texture overlay */
+  .noise{position:fixed;inset:0;pointer-events:none;z-index:1;opacity:.025;mix-blend-mode:overlay;background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='3'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E")}
+
+  /* subtle scanline on hero */
+  .scan-hero{position:absolute;inset:0;pointer-events:none;background:repeating-linear-gradient(0deg, rgba(0,229,255,.025) 0 1px, transparent 1px 3px);mix-blend-mode:screen;opacity:.4}
+
+  /* system metric bar */
+  .metric{display:flex;align-items:center;gap:10px;padding:8px 0}
+  .metric-label{font-size:11px;color:var(--inkdim);text-transform:uppercase;letter-spacing:.08em;width:68px;flex-shrink:0}
+  .metric-value{font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--ink);min-width:48px;text-align:right}
+</style>
 </head>
 <body>
-  <div id="toast"></div>
-  <header>
-    <div class="logo"><em>J</em>ARVIS</div>
-    <div class="pill" id="pill"><span class="dot"></span><span id="st">Connecting</span></div>
-    <div class="enc-badge" id="enc">AES-256</div>
-    <div class="spacer"></div>
-    <div class="url">__IP__:__PORT__</div>
-  </header>
-  <main id="feed"></main>
-  <footer>
-    <input id="inp" placeholder="Send a command to JARVIS…" autocomplete="off">
-    <label class="btn-attach" for="file-inp" title="Send file">📎</label>
-    <input type="file" id="file-inp" multiple accept="*/*" style="display:none">
-    <button id="mic-btn" onclick="doMic()" title="Voice command">🎤</button>
-    <button class="btn btn-wake" id="wake" onclick="doWake()">WAKE</button>
-    <button class="btn btn-send" onclick="doSend()">SEND</button>
-  </footer>
 
-  <script>
-    // ── Auth — bearer token ───────────────────────────────────────────────────
-    const _authToken  = sessionStorage.getItem('jarvis_token');
-    const _sessionKey = sessionStorage.getItem('jarvis_key');
+<div class="bg-base"></div>
+<div class="bg-aurora"></div>
+<div class="bg-grid"></div>
+<div class="bg-scan"></div>
+<div class="stars" aria-hidden="true">
+  <svg xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <radialGradient id="starGlow"><stop offset="0%" stop-color="#fff" stop-opacity=".9"/><stop offset="100%" stop-color="#fff" stop-opacity="0"/></radialGradient>
+    </defs>
+  </svg>
+</div>
+<div class="noise"></div>
 
-    if (!_authToken) {
-      location.replace('/login');
+<div id="toast"></div>
+
+<div class="relative flex h-full z-10">
+
+  <!-- scrim for mobile sidebar -->
+  <div class="scrim" id="scrim" onclick="toggleSidebar(false)"></div>
+
+  <!-- SIDEBAR -->
+  <aside id="sidebar" class="sidebar border-r border-white/5 px-3.5 py-5 flex flex-col relative z-20 h-full backdrop-blur-xl">
+
+    <div class="flex items-center gap-3 mb-6 px-2">
+      <div class="w-11 h-11 rounded-2xl relative shrink-0"
+           style="background:conic-gradient(from 210deg,#00E5FF,#3D7EFF,#8B6BFF,#00E5FF);box-shadow:0 0 24px rgba(0,229,255,.5), inset 0 0 12px rgba(0,0,0,.4)">
+        <div class="absolute inset-[3px] rounded-[14px] bg-obsidian grid place-items-center font-head text-cyan1 font-black text-[12px] tracking-widest" style="background:radial-gradient(circle at 30% 30%, #0A0F1C 0%, #05070d 100%)">J·A</div>
+      </div>
+      <div class="brand-word transition-opacity min-w-0">
+        <div class="font-head text-[14px] font-black tracking-[0.22em] text-ink">JARVIS</div>
+        <div class="text-[9.5px] uppercase tracking-[0.28em] text-inkdim font-semibold">Command Center · v7</div>
+      </div>
+    </div>
+
+    <div class="sidebar-search mb-5 transition-opacity relative">
+      <div class="relative">
+        <svg class="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-inkdim pointer-events-none" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+        <input id="palette" type="text" placeholder="Jump or command — ⌘K" class="glow-input w-full text-[13px] rounded-xl pl-9 pr-10 py-2.5" autocomplete="off" />
+        <span class="absolute right-3 top-1/2 -translate-y-1/2 text-[9px] text-inkdim border border-white/10 rounded px-1.5 py-0.5 mono font-semibold">⌘K</span>
+      </div>
+      <div id="palette-drop" class="palette-drop"></div>
+    </div>
+
+    <div class="eyebrow px-2 mb-2 lbl-txt transition-opacity flex items-center gap-2">
+      <span class="w-1 h-1 rounded-full bg-cyan1 opacity-80"></span>
+      <span>Workspace</span>
+    </div>
+    <nav class="space-y-0.5 text-[13px] font-medium" id="nav-primary"></nav>
+
+    <div class="eyebrow px-2 mt-5 mb-2 lbl-txt transition-opacity flex items-center gap-2">
+      <span class="w-1 h-1 rounded-full bg-violet opacity-80"></span>
+      <span>Executive</span>
+    </div>
+    <nav class="space-y-0.5 text-[13px] font-medium" id="nav-exec"></nav>
+
+    <div class="eyebrow px-2 mt-5 mb-2 lbl-txt transition-opacity flex items-center gap-2">
+      <span class="w-1 h-1 rounded-full bg-mint opacity-80"></span>
+      <span>System</span>
+    </div>
+    <nav class="space-y-0.5 text-[13px] font-medium" id="nav-system"></nav>
+
+    <div class="mt-auto pt-4 border-t border-white/5 flex items-center gap-3 px-2">
+      <div class="w-10 h-10 rounded-xl shrink-0 relative" style="background:linear-gradient(135deg,#00E5FF,#8B6BFF);box-shadow:0 0 18px rgba(0,229,255,.3)">
+        <div class="absolute inset-[2px] rounded-[10px] grid place-items-center text-[10px] font-black text-ink" style="background:radial-gradient(circle at 30% 30%, #0A0F1C 0%, #05070d 100%)">OP</div>
+        <div class="absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full bg-mint border-2 border-obsidian" style="box-shadow:0 0 8px rgba(64,227,159,.8)"></div>
+      </div>
+      <div class="profile-meta transition-opacity min-w-0">
+        <div class="text-[13px] font-semibold truncate">Operator</div>
+        <div class="text-[10.5px] text-inkdim truncate mono" id="profile-net">—</div>
+      </div>
+      <button onclick="toggleCollapsed()" class="lbl-txt ml-auto w-7 h-7 grid place-items-center rounded-lg text-inkdim hover:text-ink hover:bg-white/5 transition" title="Collapse">
+        <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M15 18l-6-6 6-6"/></svg>
+      </button>
+    </div>
+  </aside>
+
+  <!-- MAIN -->
+  <main class="flex-1 min-w-0 flex flex-col relative z-10">
+
+    <!-- TOPBAR -->
+    <header class="flex items-center gap-3 px-5 md:px-8 py-3.5 border-b border-white/5 relative" style="background:linear-gradient(180deg, rgba(10,15,28,.6) 0%, rgba(10,15,28,.3) 100%);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px)">
+      <button onclick="toggleSidebar()" class="md:hidden w-9 h-9 grid place-items-center rounded-xl btn-ghost">
+        <svg class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 6h18"/><path d="M3 12h18"/><path d="M3 18h18"/></svg>
+      </button>
+
+      <div class="flex items-center gap-2 text-[13px] text-inkdim">
+        <span class="hidden sm:inline mono text-[11px] tracking-wider uppercase">Workspace</span>
+        <svg class="w-3 h-3 text-inkdim hidden sm:block" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg>
+        <span id="crumb" class="text-ink font-semibold">Overview</span>
+      </div>
+
+      <div class="ml-2 flex items-center gap-2 px-3 py-1.5 rounded-full border transition-colors" id="status-pill"
+           style="background:rgba(64,227,159,.08);border-color:rgba(64,227,159,.3)">
+        <span class="dot mint pulse" id="status-dot"></span>
+        <span class="text-[12px] font-semibold text-mint" id="status-text">Connecting</span>
+        <span class="text-[10.5px] text-inkdim mono" id="status-latency">—</span>
+      </div>
+
+      <!-- live mini-eq (shows when assistant active) -->
+      <div class="hidden md:flex items-center gap-[2px] h-5 ml-1" id="mini-eq" style="opacity:.6">
+        <span class="eq-bar" style="height:6px"></span>
+        <span class="eq-bar" style="height:10px;animation-delay:.1s"></span>
+        <span class="eq-bar" style="height:14px;animation-delay:.2s"></span>
+        <span class="eq-bar" style="height:8px;animation-delay:.3s"></span>
+        <span class="eq-bar" style="height:12px;animation-delay:.4s"></span>
+      </div>
+
+      <div class="flex-1"></div>
+
+      <div class="hidden md:flex items-center gap-2 mono text-[12px] text-inkmed px-3 py-1.5 rounded-lg border border-white/5" style="background:rgba(255,255,255,.015)">
+        <svg class="w-3.5 h-3.5 text-cyan1" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+        <span id="clock">--:--:--</span>
+        <span class="text-inkdim text-[10px]">·</span>
+        <span id="clock-date" class="text-inkdim text-[11px]">—</span>
+      </div>
+
+      <div id="enc-badge" class="chip">— ENC</div>
+
+      <button onclick="doWake()" class="hidden md:inline-flex btn-ghost rounded-xl px-3.5 py-1.5 text-[11px] font-bold tracking-[.14em] items-center gap-1.5" title="Send wake signal">
+        <svg class="w-3.5 h-3.5 text-cyan1" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m13 2-9 13h8l-1 7 9-13h-8z"/></svg>
+        WAKE
+      </button>
+    </header>
+
+    <!-- VIEW HOST -->
+    <div id="view" class="flex-1 overflow-y-auto scroll px-5 md:px-8 py-6"></div>
+
+  </main>
+</div>
+
+<!-- hidden file input, reused by any view -->
+<input type="file" id="file-inp" multiple accept="*/*" style="display:none" />
+
+<svg width="0" height="0" style="position:absolute">
+  <defs>
+    <linearGradient id="ringGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#00E5FF"/>
+      <stop offset="60%" stop-color="#3D7EFF"/>
+      <stop offset="100%" stop-color="#8B6BFF"/>
+    </linearGradient>
+    <linearGradient id="barGradient" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#00E5FF"/>
+      <stop offset="100%" stop-color="#3D7EFF"/>
+    </linearGradient>
+    <linearGradient id="sparkGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#00E5FF" stop-opacity=".45"/>
+      <stop offset="100%" stop-color="#00E5FF" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+</svg>
+
+<script>
+'use strict';
+
+/* ───────────────────────── Auth ───────────────────────── */
+const _authToken  = sessionStorage.getItem('jarvis_token');
+const _sessionKey = sessionStorage.getItem('jarvis_key');
+if (!_authToken) { location.replace('/login'); }
+
+function _authHeader(){ return { 'Authorization': `Bearer ${_authToken}` }; }
+function _authFetch(url, opts = {}){
+  opts.headers = Object.assign({}, opts.headers, _authHeader());
+  return fetch(url, opts);
+}
+async function _getJSON(url){
+  try{
+    const r = await _authFetch(url, {cache:'no-store'});
+    if(!r.ok) return null;
+    return await r.json();
+  }catch(_){ return null; }
+}
+
+/* ─────────────── AES-256-CBC (CryptoJS) ─────────────── */
+const _AES_SALT = 'JARVIS-DASHBOARD-v1';
+let _aesKey = null;
+function _initCrypto(key){
+  if(typeof CryptoJS === 'undefined') return false;
+  _aesKey = CryptoJS.SHA256(key + _AES_SALT);
+  return true;
+}
+function _encrypt(plaintext){
+  if(!_aesKey || typeof CryptoJS === 'undefined') return null;
+  try{
+    const iv  = CryptoJS.lib.WordArray.random(16);
+    const enc = CryptoJS.AES.encrypt(CryptoJS.enc.Utf8.parse(plaintext), _aesKey,
+      {iv, mode:CryptoJS.mode.CBC, padding:CryptoJS.pad.Pkcs7});
+    const ivHex = iv.toString(CryptoJS.enc.Hex);
+    const ctHex = enc.ciphertext.toString(CryptoJS.enc.Hex);
+    const hex   = ivHex + ctHex;
+    const bytes = new Uint8Array(hex.length/2);
+    for(let i=0;i<bytes.length;i++) bytes[i] = parseInt(hex.substr(i*2,2), 16);
+    return btoa(String.fromCharCode(...bytes));
+  }catch{ return null; }
+}
+const _encReady = _sessionKey ? _initCrypto(_sessionKey) : false;
+(function(){
+  const b = document.getElementById('enc-badge');
+  if(_encReady){ b.className = 'chip mint'; b.innerHTML = '<span class="dot mint"></span>AES-256'; }
+  else         { b.className = 'chip crimson'; b.textContent = 'NO ENC'; }
+})();
+
+/* ─────────────── Starfield ─────────────── */
+(function(){
+  const host = document.querySelector('.stars svg');
+  if(!host) return;
+  let seed = 1;
+  const rand = () => { seed = (seed * 9301 + 49297) % 233280; return seed/233280; };
+  const w = window.innerWidth, h = window.innerHeight;
+  const frag = document.createDocumentFragment();
+  host.setAttribute('viewBox',`0 0 ${w} ${h}`);
+  for(let i=0;i<70;i++){
+    const c = document.createElementNS('http://www.w3.org/2000/svg','circle');
+    c.setAttribute('cx', (rand()*w)|0);
+    c.setAttribute('cy', (rand()*h)|0);
+    c.setAttribute('r', (rand()*1.1 + .3).toFixed(2));
+    c.setAttribute('fill', '#fff');
+    c.setAttribute('opacity', (rand()*.55 + .15).toFixed(2));
+    frag.appendChild(c);
+  }
+  host.appendChild(frag);
+})();
+
+/* ─────────────── State ─────────────── */
+const State = {
+  status:   'connecting',
+  history:  [],
+  metrics:  null,
+  server:   null,
+  view:     'overview',
+  openNav:  false,
+  collapsed:false,
+  latency:  null,
+  voiceOn:  false,
+  overview: null,
+};
+
+/* ─────────────── Utils ─────────────── */
+const esc = s => String(s==null?'':s).replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+const fmtSize = b => b<1024?b+' B':b<1048576?(b/1024).toFixed(1)+' KB':b<1073741824?(b/1048576).toFixed(1)+' MB':(b/1073741824).toFixed(2)+' GB';
+const fmtRelative = ts => {
+  if(!ts) return '—';
+  const d = typeof ts==='string' ? new Date(ts) : new Date(ts*1000);
+  if(isNaN(d.getTime())) return String(ts);
+  const diff = (Date.now() - d.getTime())/1000;
+  if(diff<60) return 'just now';
+  if(diff<3600) return Math.floor(diff/60)+'m ago';
+  if(diff<86400) return Math.floor(diff/3600)+'h ago';
+  if(diff<2592000) return Math.floor(diff/86400)+'d ago';
+  return d.toLocaleDateString();
+};
+const fmtDate = ts => {
+  if(!ts) return '—';
+  const d = typeof ts==='string' ? new Date(ts) : new Date(ts*1000);
+  if(isNaN(d.getTime())) return String(ts);
+  return d.toLocaleString(undefined,{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});
+};
+const fmtGreeting = () => {
+  const h = new Date().getHours();
+  if(h<5)  return 'Working late';
+  if(h<12) return 'Good morning';
+  if(h<17) return 'Good afternoon';
+  if(h<21) return 'Good evening';
+  return 'Good night';
+};
+let _toastTimer;
+function toast(msg, kind){
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = kind==='err' ? 'show err' : 'show';
+  clearTimeout(_toastTimer);
+  _toastTimer = setTimeout(()=>{ t.className = ''; }, 2600);
+}
+
+/* ─────────────── Clock ─────────────── */
+function tickClock(){
+  const el = document.getElementById('clock');
+  const ed = document.getElementById('clock-date');
+  if(el){
+    const d = new Date();
+    el.textContent = d.toLocaleTimeString([], {hour12:false});
+    if(ed) ed.textContent = d.toLocaleDateString(undefined,{weekday:'short',day:'2-digit',month:'short'}).toUpperCase();
+  }
+}
+setInterval(tickClock, 1000); tickClock();
+
+/* ─────────────── Icons ─────────────── */
+const I = {
+  home:    '<path d="M3 12 12 3l9 9"/><path d="M5 10v10h14V10"/>',
+  spark:   '<path d="M12 3v4"/><path d="M12 17v4"/><path d="M4 12H2"/><path d="M22 12h-2"/><path d="m4.9 4.9 2.8 2.8"/><path d="m16.3 16.3 2.8 2.8"/><path d="m4.9 19.1 2.8-2.8"/><path d="m16.3 7.7 2.8-2.8"/><circle cx="12" cy="12" r="3"/>',
+  chat:    '<path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z"/>',
+  mic:     '<rect x="9" y="3" width="6" height="12" rx="3"/><path d="M5 11a7 7 0 0 0 14 0"/><path d="M12 19v3"/>',
+  task:    '<path d="M9 11l3 3 8-8"/><path d="M20 12v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h9"/>',
+  mem:     '<path d="M12 3a4 4 0 0 1 4 4v1h1a3 3 0 0 1 3 3v0a3 3 0 0 1-3 3h-1v1a4 4 0 0 1-8 0v-1H7a3 3 0 0 1-3-3v0a3 3 0 0 1 3-3h1V7a4 4 0 0 1 4-4z"/>',
+  book:    '<path d="M4 4h12a4 4 0 0 1 4 4v12H8a4 4 0 0 1-4-4z"/><path d="M4 4v12a4 4 0 0 0 4 4"/>',
+  folder:  '<path d="M3 7a2 2 0 0 1 2-2h4l2 3h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
+  cal:     '<rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4"/><path d="M8 2v4"/><path d="M3 10h18"/>',
+  users:   '<path d="M17 20v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 20v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>',
+  cash:    '<rect x="2" y="6" width="20" height="12" rx="2"/><circle cx="12" cy="12" r="3"/><path d="M6 10v4"/><path d="M18 10v4"/>',
+  plane:   '<path d="M17.8 19.2 16 11l3.5-3.5C21 6 21.5 4 21 3c-1-.5-3 0-4.5 1.5L13 8 4.8 6.2c-.5-.1-.9.1-1.1.5l-.3.5c-.2.5-.1 1 .3 1.3L9 12l-2 3H4l-1 1 3 2 2 3 1-1v-3l3-2 3.5 5.3c.3.4.8.5 1.3.3l.5-.2c.4-.2.6-.6.5-1.1z"/>',
+  bolt:    '<path d="m13 2-9 13h8l-1 7 9-13h-8z"/>',
+  plugs:   '<path d="M9 3v6"/><path d="M15 3v6"/><path d="M6 9h12l-1 12H7z"/>',
+  chip:    '<rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 1v3"/><path d="M15 1v3"/><path d="M9 20v3"/><path d="M15 20v3"/><path d="M20 9h3"/><path d="M20 14h3"/><path d="M1 9h3"/><path d="M1 14h3"/>',
+  radar:   '<circle cx="12" cy="12" r="9"/><path d="M12 12 3 3"/><path d="M12 12v9"/>',
+  gear:    '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>',
+  attach:  '<path d="M21 11.5V18a4 4 0 0 1-4 4H7a4 4 0 0 1-4-4V6a4 4 0 0 1 4-4h6.5"/><path d="M14 2h7v7"/><path d="m21 2-9 9"/>',
+  arrow:   '<path d="M5 12h14"/><path d="m12 5 7 7-7 7"/>',
+};
+const svg = (d, cls='w-[18px] h-[18px] shrink-0') =>
+  `<svg class="${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${d}</svg>`;
+
+/* ─────────────── Navigation registry ─────────────── */
+const NAV = {
+  primary: [
+    { id:'overview',  label:'Overview',    icon:'home'  },
+    { id:'assistant', label:'Assistant',   icon:'chat'  },
+    { id:'voice',     label:'Voice Deck',  icon:'mic'   },
+    { id:'memory',    label:'Memory',      icon:'mem'   },
+    { id:'journal',   label:'Journal',     icon:'book'  },
+  ],
+  exec: [
+    { id:'tasks',       label:'Tasks',        icon:'task'   },
+    { id:'projects',    label:'Projects',     icon:'folder' },
+    { id:'commitments', label:'Commitments',  icon:'spark'  },
+    { id:'contacts',    label:'Contacts',     icon:'users'  },
+    { id:'calendar',    label:'Calendar',     icon:'cal'    },
+    { id:'finance',     label:'Finance',      icon:'cash'   },
+    { id:'travel',      label:'Travel',       icon:'plane'  },
+  ],
+  system: [
+    { id:'agents',    label:'AI Agents',    icon:'bolt'  },
+    { id:'intelligence', label:'Intelligence', icon:'radar' },
+    { id:'plugins',   label:'Plugins · MCP',icon:'plugs' },
+    { id:'system',    label:'System',       icon:'chip'  },
+    { id:'settings',  label:'Settings',     icon:'gear'  },
+  ],
+};
+function renderNav(){
+  const badges = {
+    tasks: ()=> State.overview?.todos?.open,
+    commitments: ()=> State.overview?.commitments?.due_24h,
+    agents: ()=> {
+      const t = State.overview?.tasks?.by_status || {};
+      return (t.running||0) + (t.planned||0);
+    },
+  };
+  const build = (bucket, host) => {
+    host.innerHTML = bucket.map(it => {
+      const b = badges[it.id] && badges[it.id]();
+      const badge = b ? `<span class="nav-badge">${b}</span>` : '';
+      return `<button data-view="${it.id}" class="rail-btn w-full flex items-center gap-3 px-3 py-2.5 text-inkmed">
+        ${svg(I[it.icon])}
+        <span class="lbl-txt transition-opacity truncate">${esc(it.label)}</span>
+        ${badge}
+      </button>`;
+    }).join('');
+  };
+  build(NAV.primary, document.getElementById('nav-primary'));
+  build(NAV.exec,    document.getElementById('nav-exec'));
+  build(NAV.system,  document.getElementById('nav-system'));
+  document.querySelectorAll('[data-view]').forEach(b=>{
+    b.onclick = ()=> go(b.dataset.view);
+  });
+}
+function updateCrumb(){
+  const all = [...NAV.primary, ...NAV.exec, ...NAV.system];
+  const it = all.find(x=>x.id===State.view);
+  document.getElementById('crumb').textContent = it ? it.label : State.view;
+  document.querySelectorAll('[data-view]').forEach(b=>{
+    b.classList.toggle('active', b.dataset.view===State.view);
+  });
+}
+function toggleSidebar(force){
+  const sb = document.getElementById('sidebar');
+  const sc = document.getElementById('scrim');
+  const open = force !== undefined ? force : !sb.classList.contains('open');
+  sb.classList.toggle('open', open);
+  sc.classList.toggle('show', open);
+}
+function toggleCollapsed(){
+  State.collapsed = !State.collapsed;
+  document.getElementById('sidebar').classList.toggle('collapsed', State.collapsed);
+}
+
+/* ─────────────── Router ─────────────── */
+let _goSeq = 0;
+const fresh = my => my === _goSeq;
+async function go(view){
+  const my = ++_goSeq;
+  State.view = view || 'overview';
+  updateCrumb();
+  if(location.hash !== '#'+State.view) location.hash = '#'+State.view;
+  toggleSidebar(false);
+  const host = document.getElementById('view');
+  host.innerHTML = '<div class="empty fade-up">Loading…</div>';
+  const fn = Views[State.view] || Views.overview;
+  try{ await fn(host, my); }
+  catch(e){ if(fresh(my)) host.innerHTML = `<div class="empty fade-up">View error: ${esc(e.message||e)}</div>`; }
+  if(fresh(my) && host.firstChild && host.firstChild.classList) host.firstChild.classList.add('fade-up');
+}
+window.addEventListener('hashchange', ()=> {
+  const want = location.hash.replace('#','') || 'overview';
+  if(want !== State.view) go(want);
+});
+
+/* ─────────────── Status wiring ─────────────── */
+function setStatus(s){
+  State.status = s;
+  const pill = document.getElementById('status-pill');
+  const dot  = document.getElementById('status-dot');
+  const txt  = document.getElementById('status-text');
+  const miniEq = document.getElementById('mini-eq');
+  const map = {
+    active:   { cls:'mint',   text:'Active',   bg:'rgba(64,227,159,.08)', bd:'rgba(64,227,159,.32)',fg:'text-mint'   },
+    sleeping: { cls:'amber',  text:'Sleeping', bg:'rgba(255,184,78,.08)', bd:'rgba(255,184,78,.32)',fg:'text-amber'  },
+    offline:  { cls:'crimson',text:'Offline',  bg:'rgba(255,107,107,.08)',bd:'rgba(255,107,107,.32)',fg:'text-crimson'},
+    idle:     { cls:'idle',   text:'Idle',     bg:'rgba(255,255,255,.04)',bd:'rgba(255,255,255,.1)', fg:'text-inkmed' },
+    connecting:{cls:'idle',   text:'Linking',  bg:'rgba(255,255,255,.04)',bd:'rgba(255,255,255,.1)', fg:'text-inkmed' },
+  };
+  const m = map[s] || map.connecting;
+  dot.className = 'dot '+m.cls+(s==='active'||s==='sleeping'?' pulse':'');
+  txt.textContent = m.text;
+  txt.className = 'text-[12px] font-semibold '+m.fg;
+  pill.style.background = m.bg;
+  pill.style.borderColor = m.bd;
+  if(miniEq) miniEq.style.opacity = s==='active' ? '.9' : '.25';
+  document.getElementById('profile-net').textContent =
+    s==='active' ? 'online · secured' : s==='sleeping' ? 'standby' : s==='offline' ? 'disconnected' : s==='idle' ? 'awaiting host' : 'linking…';
+}
+setStatus('connecting');
+setTimeout(()=>{ if(State.status==='connecting') setStatus('idle'); }, 3000);
+
+/* ─────────────── WebSocket (chat relay + history) ─────────────── */
+const _wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
+const _wsUrl   = `${_wsProto}://${location.host}/ws?token=${encodeURIComponent(_authToken)}`;
+let ws = null;
+let _wsConnectedAt = 0;
+function connectWS(){
+  ws = new WebSocket(_wsUrl);
+  ws.onopen = ()=>{
+    _wsConnectedAt = performance.now();
+    pushHistory({type:'sys', text:'Remote session active.'});
+    toast('Connected to JARVIS');
+  };
+  ws.onclose = ()=>{
+    setStatus('offline');
+    pushHistory({type:'sys', text:'Connection lost — refresh to reconnect.'});
+  };
+  ws.onerror = ()=> pushHistory({type:'sys', text:'Connection error.'});
+  ws.onmessage = (e)=>{
+    let m; try{ m = JSON.parse(e.data); }catch{ return; }
+    pushHistory(m);
+    if(m.type === 'status') setStatus(m.state === 'active' ? 'active' : 'sleeping');
+    if(m.type === 'wake')   toast('Wake detected');
+    if(m.type === 'file_received') toast('File received!');
+  };
+}
+connectWS();
+
+function pushHistory(m){
+  State.history.push(m);
+  if(State.history.length > 400) State.history = State.history.slice(-400);
+  if(_chatHooks.length){ for(const fn of _chatHooks) try{ fn(m); }catch{} }
+  if(_feedHooks.length){ for(const fn of _feedHooks) try{ fn(m); }catch{} }
+}
+const _chatHooks = [];
+const _feedHooks = [];
+
+/* ─────────────── Command send ─────────────── */
+async function sendCommand(text){
+  if(!text) return;
+  pushHistory({type:'log', speaker:'user', text});
+  const enc  = _encrypt(text);
+  const body = enc ? { enc } : { text };
+  try{
+    await _authFetch('/api/command', {
+      method:'POST',
+      headers:{ 'Content-Type':'application/json' },
+      body: JSON.stringify(body),
+    });
+  }catch{ toast('Send failed','err'); }
+}
+async function doWake(){
+  pushHistory({type:'sys', text:'Sending wake signal…'});
+  try{ await _authFetch('/api/wake',{method:'POST'}); }
+  catch{ toast('Wake failed','err'); }
+}
+
+/* ─────────────── Chart / viz helpers ─────────────── */
+function sparkline(points, opts){
+  opts = opts || {};
+  const w = opts.w || 120, h = opts.h || 28;
+  if(!points || !points.length) points = [0,0];
+  const min = Math.min(...points), max = Math.max(...points);
+  const range = (max - min) || 1;
+  const stride = w / Math.max(1, points.length-1);
+  const path = points.map((v,i)=>{
+    const x = (i*stride).toFixed(1);
+    const y = (h - ((v-min)/range) * (h-4) - 2).toFixed(1);
+    return (i===0?'M':'L')+x+' '+y;
+  }).join(' ');
+  const area = path + ` L${w} ${h} L0 ${h} Z`;
+  return `<svg class="spark" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">
+    <path d="${area}" fill="url(#sparkGrad)"/>
+    <path d="${path}" stroke="#00E5FF" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+  </svg>`;
+}
+function ringProgress(pct, size){
+  size = size || 54;
+  const r = (size/2) - 4;
+  const c = 2 * Math.PI * r;
+  const off = c * (1 - Math.min(1, Math.max(0, pct/100)));
+  return `<svg class="ring-progress" width="${size}" height="${size}">
+    <circle cx="${size/2}" cy="${size/2}" r="${r}" class="track"/>
+    <circle cx="${size/2}" cy="${size/2}" r="${r}" class="fill" stroke-dasharray="${c.toFixed(2)}" stroke-dashoffset="${off.toFixed(2)}"/>
+  </svg>`;
+}
+function donutChart(data, size){
+  size = size || 170;
+  const r = size/2 - 10;
+  const cx = size/2, cy = size/2;
+  const total = data.reduce((s,d)=>s+d.v,0) || 1;
+  const colors = ['#00E5FF','#3D7EFF','#8B6BFF','#40E39F','#FFB84E','#FF6B6B','#9AA3B7'];
+  let a0 = -Math.PI/2;
+  const arcs = data.map((d,i)=>{
+    const frac = d.v/total;
+    const a1 = a0 + frac * Math.PI * 2;
+    const large = (a1-a0) > Math.PI ? 1 : 0;
+    const x0 = (cx + r*Math.cos(a0)).toFixed(2), y0 = (cy + r*Math.sin(a0)).toFixed(2);
+    const x1 = (cx + r*Math.cos(a1)).toFixed(2), y1 = (cy + r*Math.sin(a1)).toFixed(2);
+    const col = d.color || colors[i%colors.length];
+    const path = `M${x0} ${y0} A${r} ${r} 0 ${large} 1 ${x1} ${y1}`;
+    a0 = a1;
+    return `<path d="${path}" stroke="${col}" stroke-width="14" fill="none" stroke-linecap="butt" opacity=".9"/>`;
+  }).join('');
+  return `<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">${arcs}</svg>`;
+}
+
+/* ─────────────── View primitives ─────────────── */
+const Views = {};
+
+function card(cls, inner){
+  return `<div class="glass glass-hv rounded-2xl ${cls||''}">${inner}</div>`;
+}
+function statTile(opts){
+  const {label, value, foot, icon, kind, spark} = opts;
+  const chipHtml = kind ? `<span class="chip ${kind}">${foot||''}</span>` : (foot?`<div class="text-[11px] text-inkdim mt-1">${esc(foot)}</div>`:'');
+  const sparkHtml = spark ? `<div class="mt-3 -mb-1 opacity-80">${sparkline(spark)}</div>` : '';
+  return `<div class="glass glass-hv rounded-2xl p-5 cursor-pointer relative overflow-hidden group">
+    <div class="flex items-start justify-between gap-3 relative z-10">
+      <div class="min-w-0 flex-1">
+        <div class="eyebrow">${esc(label)}</div>
+        <div class="text-[30px] font-display font-bold mt-1 tracking-tight text-ink leading-none">${esc(value)}</div>
+        ${foot && kind ? `<div class="mt-2">${chipHtml}</div>` : (foot?chipHtml:'')}
+      </div>
+      <div class="w-10 h-10 rounded-xl grid place-items-center text-cyan1 shrink-0" style="background:rgba(0,229,255,.06);border:1px solid rgba(0,229,255,.22);box-shadow:inset 0 0 14px rgba(0,229,255,.1)">
+        ${svg(I[icon]||I.spark,'w-5 h-5')}
+      </div>
+    </div>
+    ${sparkHtml}
+  </div>`;
+}
+function sectionTitle(t, right){
+  return `<div class="flex items-end justify-between mb-3 mt-7 first:mt-0">
+    <h2 class="eyebrow">${esc(t)}</h2>
+    <div class="text-[12px] text-inkdim">${right||''}</div>
+  </div>`;
+}
+function emptyBlock(msg, tip){
+  return `<div class="empty">
+    ${svg(I.radar,'w-7 h-7')}
+    <div class="font-medium text-inkmed">${esc(msg)}</div>
+    ${tip?`<div class="text-[11px] text-inkdim mt-1">${esc(tip)}</div>`:''}
+  </div>`;
+}
+function pageHeader(title, subtitle, actions){
+  return `<div class="flex items-end justify-between mb-6 gap-4 flex-wrap">
+    <div>
+      <h1 class="page-title">${esc(title)}</h1>
+      ${subtitle?`<p class="text-[13px] text-inkmed mt-1.5">${esc(subtitle)}</p>`:''}
+    </div>
+    ${actions?`<div class="flex gap-2 items-center">${actions}</div>`:''}
+  </div>`;
+}
+
+/* ───────── Overview ───────── */
+Views.overview = async (host, my) => {
+  const data = await _getJSON('/api/data/overview');
+  if(!fresh(my)) return;
+  State.overview = data; renderNav(); updateCrumb();
+  const stats = data || {};
+  const now = new Date();
+  const dateStr = now.toLocaleDateString(undefined,{weekday:'long',month:'long',day:'numeric'});
+  const timeStr = now.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
+
+  host.innerHTML = `
+    <!-- HERO -->
+    <div class="relative rounded-3xl stroke-cy p-6 md:p-9 mb-7 overflow-hidden"
+         style="background:linear-gradient(135deg, rgba(0,229,255,.05) 0%, rgba(61,126,255,.03) 50%, rgba(139,107,255,.02) 100%);">
+      <div class="scan-hero"></div>
+      <div class="flex flex-col md:flex-row gap-7 md:items-center relative z-10">
+
+        <!-- AI CORE visualization -->
+        <div class="relative shrink-0 mx-auto md:mx-0 w-44 h-44">
+          <div class="w-44 h-44 rounded-full relative grid place-items-center"
+               style="background:radial-gradient(circle at 30% 30%, rgba(0,229,255,.3) 0%, rgba(61,126,255,.1) 50%, transparent 72%); box-shadow:inset 0 0 50px rgba(0,229,255,.18)">
+            <div class="core-ring r1"></div>
+            <div class="core-ring r2"></div>
+            <div class="core-ring r3"></div>
+            <div class="orbit"><span class="particle"></span></div>
+            <div class="orbit rev"><span class="particle" style="background:#8B6BFF;box-shadow:0 0 10px rgba(139,107,255,.9)"></span></div>
+            <div class="w-24 h-24 rounded-full grid place-items-center font-head text-cyan1 text-xl font-black tracking-widest relative z-10"
+                 style="background:radial-gradient(circle,#0A0F1C 0%, #05070d 100%); box-shadow:inset 0 0 26px rgba(0,229,255,.35), 0 0 36px rgba(0,229,255,.2); border:1px solid rgba(0,229,255,.35)">
+              J·A
+            </div>
+          </div>
+        </div>
+
+        <!-- Greeting -->
+        <div class="flex-1 min-w-0">
+          <div class="eyebrow mb-2 flex items-center gap-2">
+            <span class="dot cyan"></span>
+            <span>Core · ${esc(dateStr)} · ${esc(timeStr)}</span>
+          </div>
+          <h1 class="text-[30px] md:text-[38px] font-display font-bold tracking-tight leading-[1.08]">
+            ${esc(fmtGreeting())}. All systems <span class="text-cyan1" style="text-shadow:0 0 24px rgba(0,229,255,.4)">online</span>.
+          </h1>
+          <p class="text-[14px] text-inkmed mt-2.5 max-w-2xl leading-relaxed">
+            Voice relay, encrypted channel and background memory are ready. Issue a command, or review today's intelligence below.
+          </p>
+          <div class="mt-5 flex flex-wrap gap-2">
+            <button onclick="go('assistant')" class="btn-cyan rounded-xl px-4 py-2 text-[12.5px] font-bold inline-flex items-center gap-2">
+              ${svg(I.chat,'w-4 h-4')} Start conversation
+            </button>
+            <button onclick="go('voice')" class="btn-ghost rounded-xl px-4 py-2 text-[12.5px] font-semibold inline-flex items-center gap-2">
+              ${svg(I.mic,'w-4 h-4')} Voice deck
+            </button>
+            <button onclick="doWake()" class="btn-ghost rounded-xl px-4 py-2 text-[12.5px] font-semibold inline-flex items-center gap-2">
+              ${svg(I.bolt,'w-4 h-4')} Wake
+            </button>
+          </div>
+        </div>
+
+        <!-- Live indicator -->
+        <div class="hidden md:flex flex-col items-end gap-3 shrink-0">
+          <div class="flex items-center gap-1 h-12" aria-hidden="true">
+            ${Array.from({length:8}).map((_,i)=>`<span class="eq-bar" style="height:${18+((i*7)%22)}px;animation-delay:${i*0.09}s"></span>`).join('')}
+          </div>
+          <div class="text-[10.5px] text-inkdim mono uppercase tracking-widest">
+            <span id="hero-latency">pulse live</span>
+          </div>
+          <div class="px-3 py-1.5 rounded-lg border border-white/10 bg-white/[.02] text-[10.5px] text-inkmed mono flex items-center gap-2">
+            <span class="dot mint"></span>
+            <span id="hero-status">All channels nominal</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- STATS GRID -->
+    <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 stagger" id="stat-grid"></div>
+
+    <!-- 2-column: priorities + activity -->
+    <div class="grid lg:grid-cols-3 gap-5 mt-6">
+      <div class="lg:col-span-2 glass rounded-2xl p-6" id="daily-brief">
+        <div class="eyebrow mb-3">Daily briefing</div>
+        <div class="text-[13px] text-inkmed">Loading your day…</div>
+      </div>
+      <div class="glass rounded-2xl p-6 flex flex-col" id="activity-brief" style="max-height:480px">
+        <div class="flex items-center justify-between mb-3">
+          <div class="eyebrow">Live activity</div>
+          <button onclick="go('journal')" class="text-[11px] text-cyan1 hover:underline flex items-center gap-1">All events <svg class="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg></button>
+        </div>
+        <div class="flex-1 overflow-y-auto scroll -mr-2 pr-2" id="activity-feed"></div>
+      </div>
+    </div>
+
+    <!-- Quick actions -->
+    <div class="mt-6">
+      <div class="eyebrow mb-3">Quick actions</div>
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-3 stagger">
+        ${[
+          {t:'Create task',  s:'Add to your todos',  v:'tasks',      i:'task'},
+          {t:'Set reminder', s:'Track commitments',  v:'commitments',i:'spark'},
+          {t:'Open memory',  s:'Browse facts',       v:'memory',     i:'mem'},
+          {t:'Research',     s:'Vector search',      v:'intelligence',i:'radar'},
+        ].map(q=>`
+          <button onclick="go('${q.v}')" class="glass glass-hv rounded-xl p-4 flex items-center gap-3 text-left group">
+            <div class="w-10 h-10 rounded-lg grid place-items-center text-cyan1 shrink-0 transition-all group-hover:scale-105" style="background:rgba(0,229,255,.07);border:1px solid rgba(0,229,255,.22)">${svg(I[q.i],'w-5 h-5')}</div>
+            <div class="min-w-0">
+              <div class="text-[13.5px] font-semibold">${q.t}</div>
+              <div class="text-[11px] text-inkdim">${q.s}</div>
+            </div>
+            <svg class="w-4 h-4 text-inkdim ml-auto opacity-0 group-hover:opacity-100 transition" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg>
+          </button>`).join('')}
+      </div>
+    </div>
+  `;
+
+  // Stats grid
+  const by = (stats.tasks && stats.tasks.by_status) || {};
+  const tiles = [
+    { label:'Memory facts', value: stats.memory?.total ?? 0, foot:'across categories', icon:'mem',   onClick:'memory'    },
+    { label:'Active plans', value: (by.running||0)+(by.planned||0), foot:`${stats.tasks?.count||0} total`, icon:'bolt', onClick:'agents' },
+    { label:'Open todos',   value: stats.todos?.open ?? 0, foot:`${stats.todos?.done||0} done`, icon:'task',  onClick:'tasks' },
+    { label:'Commitments',  value: stats.commitments?.open ?? 0, foot:`${stats.commitments?.due_24h||0} due <24h`, icon:'spark', kind:(stats.commitments?.due_24h||0)>0?'amber':null, onClick:'commitments' },
+    { label:'Projects',     value: stats.projects?.active ?? 0, foot:`of ${stats.projects?.count||0}`, icon:'folder', onClick:'projects' },
+    { label:'Contacts',     value: stats.contacts?.count ?? 0, foot:`${stats.contacts?.follow_ups||0} follow-ups`, icon:'users', onClick:'contacts' },
+    { label:'Journal today',value: stats.journal?.today ?? 0, foot:'events logged', icon:'book',   onClick:'journal' },
+    { label:'Vector index', value: stats.vectors?.count ?? 0, foot:'snippets embedded', icon:'radar', onClick:'intelligence' },
+  ];
+  const sg = document.getElementById('stat-grid');
+  sg.innerHTML = tiles.map(t => statTile(t)).join('');
+  [...sg.children].forEach((el, i) => el.onclick = () => go(tiles[i].onClick));
+
+  // Daily briefing
+  const brief = document.getElementById('daily-brief');
+  const dueSoon = stats.commitments?.due_24h || 0;
+  const upcoming = stats.trips?.upcoming || 0;
+  const activeProj = stats.projects?.active || 0;
+  const briefItems = [];
+  if(dueSoon)  briefItems.push({cls:'amber',   t:`${dueSoon} commitment${dueSoon>1?'s':''} due within 24 hours`, go:'commitments'});
+  if(upcoming) briefItems.push({cls:'cyan',    t:`${upcoming} upcoming trip${upcoming>1?'s':''} in the next 90 days`, go:'travel'});
+  if(activeProj) briefItems.push({cls:'mint', t:`${activeProj} project${activeProj>1?'s':''} currently active`, go:'projects'});
+  if(stats.contacts?.follow_ups) briefItems.push({cls:'cyan', t:`${stats.contacts.follow_ups} follow-up${stats.contacts.follow_ups>1?'s':''} due`, go:'contacts'});
+  if(stats.tasks && (by.failed||0)) briefItems.push({cls:'crimson', t:`${by.failed} agent task${by.failed>1?'s':''} failed`, go:'agents'});
+  if(!briefItems.length) briefItems.push({cls:'mint', t:'Nothing urgent on deck. Issue a command or review your memory.', go:'assistant'});
+
+  brief.innerHTML = `
+    <div class="flex items-center justify-between mb-4">
+      <div class="eyebrow">Daily briefing</div>
+      <div class="chip cyan"><span class="dot cyan"></span>${briefItems.length} item${briefItems.length===1?'':'s'}</div>
+    </div>
+    <ul class="space-y-1.5">
+      ${briefItems.map(b=>`
+        <li class="flex items-center gap-3 rounded-xl p-3.5 cursor-pointer hover:bg-white/[.03] transition border border-transparent hover:border-white/5"
+            onclick="go('${b.go}')">
+          <span class="dot ${b.cls} pulse"></span>
+          <span class="text-[13.5px] flex-1">${esc(b.t)}</span>
+          <svg class="w-4 h-4 text-inkdim transition group-hover:text-cyan1" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg>
+        </li>`).join('')}
+    </ul>
+  `;
+
+  // Activity feed
+  const feedEl = document.getElementById('activity-feed');
+  function renderFeed(){
+    const items = State.history.slice(-30).reverse();
+    if(!items.length){
+      feedEl.innerHTML = emptyBlock('No events yet','Activity appears here when JARVIS speaks or receives commands.');
+      return;
     }
+    feedEl.innerHTML = items.map(m => {
+      const who = m.type==='log' ? (m.speaker==='jarvis'?'JARVIS':'You') : (m.type==='status'?'System':m.type==='wake'?'Wake':'System');
+      const body = m.text || (m.state ? `Status → ${m.state}` : '');
+      const col  = m.type==='log' && m.speaker==='jarvis' ? 'text-cyan1' : m.type==='wake'?'text-mint' : 'text-inkmed';
+      const dotCls = m.type==='log' && m.speaker==='jarvis' ? 'cyan' : m.type==='wake' ? 'mint' : 'idle';
+      return `<div class="flex gap-3 py-2.5 border-b border-white/5 last:border-b-0 tl-row">
+        <div class="tl-dot bg-${dotCls==='idle'?'inkdim':dotCls+'1'}" style="background:${dotCls==='cyan'?'var(--cyan1)':dotCls==='mint'?'var(--mint)':'var(--inkdim)'};box-shadow:0 0 8px currentColor"></div>
+        <div class="min-w-0 flex-1">
+          <div class="flex items-center justify-between">
+            <div class="text-[10px] uppercase tracking-wider ${col} font-bold">${esc(who)}</div>
+            <span class="text-[9.5px] mono text-inkdim">${(new Date()).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}</span>
+          </div>
+          <div class="text-[13px] text-ink line-clamp-3 mt-0.5">${esc(body||'—')}</div>
+        </div>
+      </div>`;
+    }).join('');
+  }
+  renderFeed();
+  _feedHooks.push(renderFeed);
+};
 
-    function _authHeader() { return { 'Authorization': `Bearer ${_authToken}` }; }
-    function _authFetch(url, opts = {}) {
-      opts.headers = Object.assign({}, opts.headers, _authHeader());
-      return fetch(url, opts);
-    }
+/* ───────── Assistant (chat + voice + upload) ───────── */
+Views.assistant = async (host, my) => {
+  if(!fresh(my)) return;
+  host.innerHTML = `
+    <div class="grid lg:grid-cols-[1fr,340px] gap-5 h-full">
+      <div class="glass rounded-2xl flex flex-col overflow-hidden" style="min-height:70vh">
 
-    // ── AES-256-CBC encryption (CryptoJS) ────────────────────────────────────
-    const _AES_SALT = 'JARVIS-DASHBOARD-v1';
-    let _aesKey = null;
+        <div class="flex items-center gap-3 px-5 py-4 border-b border-white/5" style="background:linear-gradient(90deg, rgba(0,229,255,.03) 0%, transparent 100%)">
+          <div class="w-9 h-9 rounded-xl relative shrink-0" style="background:conic-gradient(from 210deg,#00E5FF,#3D7EFF,#8B6BFF,#00E5FF);box-shadow:0 0 16px rgba(0,229,255,.45)">
+            <div class="absolute inset-[2px] rounded-[9px] grid place-items-center font-head text-cyan1 text-[10px] font-black tracking-wider" style="background:radial-gradient(circle,#0A0F1C 0%, #05070d 100%)">JA</div>
+          </div>
+          <div class="min-w-0">
+            <div class="text-[13.5px] font-semibold">JARVIS Conversation</div>
+            <div class="text-[11px] text-inkdim flex items-center gap-1.5">
+              <span class="dot mint"></span>
+              <span>Encrypted channel · AES-256</span>
+            </div>
+          </div>
+          <div class="flex-1"></div>
+          <button onclick="doWake()" class="btn-ghost rounded-lg px-3 py-1.5 text-[10.5px] font-bold tracking-[.14em] flex items-center gap-1.5">
+            ${svg(I.bolt,'w-3.5 h-3.5 text-cyan1')} WAKE
+          </button>
+        </div>
 
-    function _initCrypto(key) {
-      if (typeof CryptoJS === 'undefined') return false;
-      _aesKey = CryptoJS.SHA256(key + _AES_SALT);
-      return true;
-    }
+        <div id="feed" class="flex-1 min-h-0 overflow-y-auto scroll px-5 py-5 flex flex-col gap-2.5"></div>
 
-    function _encrypt(plaintext) {
-      if (!_aesKey || typeof CryptoJS === 'undefined') return null;
-      try {
-        const iv  = CryptoJS.lib.WordArray.random(16);
-        const enc = CryptoJS.AES.encrypt(
-          CryptoJS.enc.Utf8.parse(plaintext), _aesKey,
-          { iv, mode: CryptoJS.mode.CBC, padding: CryptoJS.pad.Pkcs7 }
-        );
-        const ivHex = iv.toString(CryptoJS.enc.Hex);
-        const ctHex = enc.ciphertext.toString(CryptoJS.enc.Hex);
-        const hex   = ivHex + ctHex;
-        const bytes = new Uint8Array(hex.length / 2);
-        for (let i = 0; i < bytes.length; i++)
-          bytes[i] = parseInt(hex.substr(i * 2, 2), 16);
-        return btoa(String.fromCharCode(...bytes));
-      } catch { return null; }
-    }
+        <div class="border-t border-white/5 p-3 flex gap-2 items-center" style="background:rgba(10,15,28,.3)">
+          <label class="btn-ghost w-10 h-10 grid place-items-center rounded-xl cursor-pointer shrink-0" for="file-inp" title="Attach file">
+            ${svg(I.attach,'w-4 h-4')}
+          </label>
+          <button id="mic-btn" class="btn-ghost w-10 h-10 grid place-items-center rounded-xl shrink-0" title="Voice">
+            ${svg(I.mic,'w-4 h-4')}
+          </button>
+          <input id="inp" class="glow-input flex-1 rounded-xl px-4 py-2.5 text-[14px]" placeholder="Send a command to JARVIS…" autocomplete="off" />
+          <button id="send-btn" class="btn-cyan rounded-xl px-5 py-2.5 text-[11.5px] font-bold tracking-[.14em] shrink-0 flex items-center gap-1.5">
+            SEND ${svg(I.arrow,'w-3.5 h-3.5')}
+          </button>
+        </div>
+      </div>
 
-    const _encReady = _sessionKey ? _initCrypto(_sessionKey) : false;
-    const encBadge  = document.getElementById('enc');
-    if (_encReady) { encBadge.className = 'enc-badge on'; }
-    else           { encBadge.className = 'enc-badge off'; encBadge.textContent = 'NO ENC'; }
+      <div class="flex flex-col gap-4 min-w-0">
+        <div class="glass rounded-2xl p-5">
+          <div class="eyebrow mb-3">Session</div>
+          <dl class="text-[13px] space-y-2.5">
+            <div class="flex justify-between"><dt class="text-inkdim">State</dt><dd id="sess-state" class="font-semibold">—</dd></div>
+            <div class="flex justify-between"><dt class="text-inkdim">Encryption</dt><dd>${_encReady?'<span class="text-mint font-semibold">AES-256</span>':'<span class="text-crimson font-semibold">none</span>'}</dd></div>
+            <div class="flex justify-between"><dt class="text-inkdim">Transport</dt><dd class="mono text-[12px]">WS · HTTP${location.protocol==='https:'?'·TLS':''}</dd></div>
+            <div class="flex justify-between"><dt class="text-inkdim">Latency</dt><dd class="mono text-[12px]" id="sess-lat">—</dd></div>
+          </dl>
+        </div>
+        <div class="glass rounded-2xl p-5 flex-1 min-h-0 flex flex-col" style="max-height:60vh">
+          <div class="flex items-center justify-between mb-2">
+            <div class="eyebrow">Tool trace</div>
+            <button onclick="go('journal')" class="text-[11px] text-cyan1 hover:underline flex items-center gap-1">Full log ${svg(I.arrow,'w-3 h-3')}</button>
+          </div>
+          <div id="tool-trace" class="flex-1 overflow-y-auto scroll text-[12px] mono text-inkmed -mr-2 pr-2"></div>
+        </div>
+        <div class="glass rounded-2xl p-5">
+          <div class="eyebrow mb-3">Prompts</div>
+          <div class="space-y-1.5">
+            ${['what is on my schedule today?','summarise my open projects','any commitments due today?','show me recent journal entries'].map(p=>`
+              <button class="w-full text-left rounded-lg px-3 py-2 text-[12.5px] text-inkmed hover:text-ink hover:bg-white/[.03] transition border border-transparent hover:border-white/5" onclick="document.getElementById('inp').value='${esc(p)}';document.getElementById('inp').focus();">${esc(p)}</button>
+            `).join('')}
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
 
-    // ── WebSocket ─────────────────────────────────────────────────────────────
-    const feed  = document.getElementById('feed');
-    const pill  = document.getElementById('pill');
-    const stTxt = document.getElementById('st');
-    const wake  = document.getElementById('wake');
+  const feed   = document.getElementById('feed');
+  const inp    = document.getElementById('inp');
+  const sendBt = document.getElementById('send-btn');
+  const micBt  = document.getElementById('mic-btn');
+  const sState = document.getElementById('sess-state');
+  const sLat   = document.getElementById('sess-lat');
+  const trace  = document.getElementById('tool-trace');
 
-    const _wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
-    const _wsUrl   = `${_wsProto}://${location.host}/ws?token=${encodeURIComponent(_authToken)}`;
-    const ws       = new WebSocket(_wsUrl);
+  sState.textContent = State.status;
+  if(State.latency) sLat.textContent = State.latency+' ms';
 
-    ws.onopen    = () => { sys('Remote session active.'); toast('Connected to JARVIS'); };
-    ws.onclose   = () => sys('Connection lost — refresh to reconnect.');
-    ws.onerror   = () => sys('Connection error.');
-    ws.onmessage = (e) => {
-      const m = JSON.parse(e.data);
-      if (m.type === 'log')           append(m.speaker, m.text);
-      if (m.type === 'status')        setStatus(m.state);
-      if (m.type === 'wake')          sys('Wake word detected — connecting…');
-      if (m.type === 'sys')           sys(m.text);
-      if (m.type === 'file_received') _onFileReceived(m);
-    };
-
-    function setStatus(s) {
-      if (s === 'active') {
-        pill.className = 'pill on'; stTxt.textContent = 'Active'; wake.classList.remove('show');
-      } else {
-        pill.className = 'pill'; stTxt.textContent = 'Sleeping'; wake.classList.add('show');
-      }
-    }
-
-    function append(speaker, text) {
-      const d = document.createElement('div');
-      if (speaker === 'jarvis') {
-        d.className = 'msg msg-j';
-        d.innerHTML = `<div class="lbl">Jarvis</div>${esc(text)}`;
-      } else {
-        d.className = 'msg msg-u';
-        d.innerHTML = `<div class="lbl">You</div>${esc(text)}`;
-      }
-      feed.appendChild(d);
-      feed.scrollTop = feed.scrollHeight;
-    }
-
-    function sys(text) {
-      const d = document.createElement('div');
-      d.className = 'msg msg-sys'; d.textContent = text;
-      feed.appendChild(d); feed.scrollTop = feed.scrollHeight;
-    }
-
-    function esc(s) {
-      return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-    }
-
-    // ── File helpers ──────────────────────────────────────────────────────────
-    function _fileIcon(name) {
-      const ext = (name.split('.').pop() || '').toLowerCase();
-      if (['jpg','jpeg','png','gif','webp','heic','heif','avif','bmp','svg'].includes(ext)) return '🖼️';
-      if (['mp4','mov','avi','mkv','webm','m4v','3gp'].includes(ext))                       return '🎬';
-      if (['mp3','m4a','wav','flac','aac','ogg','opus'].includes(ext))                      return '🎵';
-      if (['pdf'].includes(ext))                                                             return '📋';
-      if (['doc','docx','txt','md','rtf','odt'].includes(ext))                              return '📝';
-      if (['xls','xlsx','csv','ods'].includes(ext))                                         return '📊';
-      if (['ppt','pptx','odp'].includes(ext))                                               return '📑';
-      if (['zip','rar','7z','tar','gz','bz2','xz'].includes(ext))                          return '📦';
-      if (['apk','exe','dmg','deb','rpm','msi'].includes(ext))                              return '⚙️';
+  function bubble(speaker, text){
+    const d = document.createElement('div');
+    d.className = 'msg '+(speaker==='jarvis'?'msg-j':'msg-u');
+    d.innerHTML = `<div class="lbl">${speaker==='jarvis'?'Jarvis':'You'}</div>${esc(text)}`;
+    feed.appendChild(d); feed.scrollTop = feed.scrollHeight;
+  }
+  function sys(text){
+    const d = document.createElement('div');
+    d.className = 'msg msg-sys'; d.textContent = text;
+    feed.appendChild(d); feed.scrollTop = feed.scrollHeight;
+  }
+  function fileCard(opts){
+    const {name, size, direction, id, done, dlUrl, err} = opts;
+    const icon = (()=>{
+      const ext=(name.split('.').pop()||'').toLowerCase();
+      if(['jpg','jpeg','png','gif','webp','heic','heif','avif','bmp','svg'].includes(ext)) return '🖼️';
+      if(['mp4','mov','avi','mkv','webm','m4v','3gp'].includes(ext)) return '🎬';
+      if(['mp3','m4a','wav','flac','aac','ogg','opus'].includes(ext)) return '🎵';
+      if(['pdf'].includes(ext)) return '📋';
+      if(['doc','docx','txt','md','rtf','odt'].includes(ext)) return '📝';
+      if(['xls','xlsx','csv','ods'].includes(ext)) return '📊';
+      if(['zip','rar','7z','tar','gz'].includes(ext)) return '📦';
       return '📎';
+    })();
+    const card = document.createElement('div');
+    card.className = 'msg-file';
+    if(id) card.id = id;
+    card.innerHTML = `
+      <div class="fc-icon">${icon}</div>
+      <div class="fc-meta">
+        <div class="lbl">${direction}</div>
+        <div class="fc-name">${esc(name)}</div>
+        <div class="fc-size">${fmtSize(size)}</div>
+        ${id ? `<div class="fc-bar-wrap"><div class="fc-bar" id="${id}_bar"></div></div>` : ''}
+        ${dlUrl ? `<a class="fc-dl" href="${dlUrl}" download="${esc(name)}">⬇ Download</a>` : ''}
+      </div>
+      <div class="fc-status ${done?'done':err?'err':''}" id="${id?id+'_st':''}">${done?'✓':err?'ERR':'0%'}</div>
+    `;
+    feed.appendChild(card); feed.scrollTop = feed.scrollHeight;
+    return card;
+  }
+
+  // Replay history
+  for(const m of State.history){
+    if(m.type==='log') bubble(m.speaker, m.text);
+    else if(m.type==='sys') sys(m.text);
+    else if(m.type==='file_received'){
+      fileCard({name:m.name, size:m.size, direction:'Received', done:true,
+        dlUrl:`/uploads/${encodeURIComponent(m.name)}?token=${encodeURIComponent(_authToken)}`});
     }
+  }
 
-    function _fmtSize(bytes) {
-      if (bytes < 1024)             return bytes + ' B';
-      if (bytes < 1024 * 1024)     return (bytes / 1024).toFixed(1) + ' KB';
-      if (bytes < 1024 ** 3)       return (bytes / 1024 / 1024).toFixed(1) + ' MB';
-      return (bytes / 1024 ** 3).toFixed(2) + ' GB';
+  const live = (m) => {
+    if(m.type==='log') bubble(m.speaker, m.text);
+    else if(m.type==='sys') sys(m.text);
+    else if(m.type==='status'){ sys(`Status → ${m.state}`); sState.textContent = m.state; }
+    else if(m.type==='wake') sys('Wake word detected — connecting…');
+    else if(m.type==='file_received'){
+      fileCard({name:m.name, size:m.size, direction:'Received', done:true,
+        dlUrl:`/uploads/${encodeURIComponent(m.name)}?token=${encodeURIComponent(_authToken)}`});
     }
+    if(m.type==='log' && m.speaker==='jarvis'){
+      const d=document.createElement('div');
+      d.className='py-1 border-b border-white/5 last:border-b-0';
+      d.innerHTML = `<span class="text-cyan1">▸</span> ${esc((m.text||'').slice(0,160))}`;
+      trace.appendChild(d); trace.scrollTop = trace.scrollHeight;
+    }
+  };
+  _chatHooks.push(live);
+  const detach = () => { const i=_chatHooks.indexOf(live); if(i>=0)_chatHooks.splice(i,1); };
+  window.addEventListener('hashchange', detach, {once:true});
 
-    // ── File upload (phone → computer) ────────────────────────────────────────
-    function _uploadFile(file) {
-      const id = 'fc_' + Date.now() + '_' + Math.random().toString(36).slice(2);
+  async function send(){
+    const t = inp.value.trim();
+    if(!t) return;
+    inp.value = '';
+    bubble('user', t);
+    await sendCommand(t);
+  }
+  sendBt.onclick = send;
+  inp.addEventListener('keydown', e=>{ if(e.key==='Enter' && !e.shiftKey){e.preventDefault(); send();} });
 
-      // Create file card in feed
-      const card = document.createElement('div');
-      card.className = 'msg-file';
-      card.id = id;
-      card.innerHTML = `
-        <div class="fc-icon">${_fileIcon(file.name)}</div>
-        <div class="fc-meta">
-          <div class="fc-lbl">Sending</div>
-          <div class="fc-name">${esc(file.name)}</div>
-          <div class="fc-size">${_fmtSize(file.size)}</div>
-          <div class="fc-bar-wrap"><div class="fc-bar" id="${id}_bar"></div></div>
-        </div>
-        <div class="fc-status" id="${id}_st">0%</div>
-      `;
-      feed.appendChild(card);
-      feed.scrollTop = feed.scrollHeight;
-
-      const xhr = new XMLHttpRequest();
-      xhr.open('POST', '/api/upload');
-      xhr.setRequestHeader('Authorization', `Bearer ${_authToken}`);
-
-      xhr.upload.onprogress = (e) => {
-        if (!e.lengthComputable) return;
-        const pct = Math.round(e.loaded / e.total * 100);
-        const bar = document.getElementById(`${id}_bar`);
-        const st  = document.getElementById(`${id}_st`);
-        if (bar) bar.style.width = pct + '%';
-        if (st)  st.textContent  = pct + '%';
-      };
-
-      xhr.onload = () => {
-        const bar  = document.getElementById(`${id}_bar`);
-        const st   = document.getElementById(`${id}_st`);
+  const fileInp = document.getElementById('file-inp');
+  fileInp.onchange = () => {
+    Array.from(fileInp.files).forEach(uploadFile);
+    fileInp.value = '';
+  };
+  function uploadFile(file){
+    const id = 'fc_'+Date.now()+'_'+Math.random().toString(36).slice(2);
+    fileCard({name:file.name, size:file.size, direction:'Sending', id});
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST','/api/upload');
+    xhr.setRequestHeader('Authorization',`Bearer ${_authToken}`);
+    xhr.upload.onprogress = (e)=>{
+      if(!e.lengthComputable) return;
+      const pct = Math.round(e.loaded/e.total*100);
+      const b = document.getElementById(`${id}_bar`); const s = document.getElementById(`${id}_st`);
+      if(b) b.style.width = pct+'%'; if(s) s.textContent = pct+'%';
+    };
+    xhr.onload = ()=>{
+      const b = document.getElementById(`${id}_bar`); const s = document.getElementById(`${id}_st`);
+      const card = document.getElementById(id);
+      if(xhr.status===200){
+        let savedName = file.name;
+        try{ savedName = JSON.parse(xhr.responseText).name || file.name; }catch{}
+        const dlUrl = `/uploads/${encodeURIComponent(savedName)}?token=${encodeURIComponent(_authToken)}`;
+        if(b){ b.style.width='100%'; b.style.background='var(--mint)'; }
+        if(s){ s.textContent='✓'; s.className='fc-status done'; }
+        const lbl = card.querySelector('.lbl'); if(lbl) lbl.textContent = 'Sent';
         const meta = card.querySelector('.fc-meta');
-        const lbl  = card.querySelector('.fc-lbl');
-        if (xhr.status === 200) {
-          let savedName = file.name;
-          try { savedName = JSON.parse(xhr.responseText).name || file.name; } catch {}
-          const dlUrl = `/uploads/${encodeURIComponent(savedName)}?token=${encodeURIComponent(_authToken)}`;
-          if (bar)  { bar.style.width = '100%'; bar.style.background = 'var(--green)'; }
-          if (st)   { st.textContent = '✓'; st.className = 'fc-status done'; }
-          if (lbl)  lbl.textContent = 'Sent';
-          if (meta) meta.insertAdjacentHTML('beforeend',
-            `<a class="fc-dl" href="${dlUrl}" download="${esc(savedName)}">⬇ Download back</a>`);
-          toast('File sent!');
-        } else {
-          let errMsg = 'Upload failed';
-          try { errMsg = JSON.parse(xhr.responseText).error || errMsg; } catch {}
-          if (bar) bar.style.background = '#f87171';
-          if (st)  { st.textContent = 'ERR'; st.className = 'fc-status err'; }
-          if (lbl) lbl.textContent = errMsg;
-        }
-      };
+        if(meta) meta.insertAdjacentHTML('beforeend',
+          `<a class="fc-dl" href="${dlUrl}" download="${esc(savedName)}">⬇ Download back</a>`);
+        toast('File sent');
+      } else {
+        if(b) b.style.background='#FF6B6B';
+        if(s){ s.textContent='ERR'; s.className='fc-status err'; }
+        toast('Upload failed','err');
+      }
+    };
+    xhr.onerror = ()=>{
+      const s = document.getElementById(`${id}_st`);
+      if(s){ s.textContent='ERR'; s.className='fc-status err'; }
+      toast('Connection error','err');
+    };
+    const fd = new FormData(); fd.append('file', file);
+    xhr.send(fd);
+  }
 
-      xhr.onerror = () => {
-        const st  = document.getElementById(`${id}_st`);
-        const lbl = card.querySelector('.fc-lbl');
-        if (st)  { st.textContent = 'ERR'; st.className = 'fc-status err'; }
-        if (lbl) lbl.textContent = 'Connection error';
-      };
+  wireMic(micBt);
+};
 
-      const fd = new FormData();
-      fd.append('file', file);
-      xhr.send(fd);
-    }
+/* ───────── Voice Deck ───────── */
+Views.voice = async (host, my) => {
+  if(!fresh(my)) return;
+  host.innerHTML = `
+    ${pageHeader('Voice Deck','Push-to-stream · 16 kHz mono PCM')}
+    <div class="grid lg:grid-cols-[1fr,420px] gap-5">
+      <div class="glass rounded-2xl p-8 text-center relative overflow-hidden stroke-cy" style="min-height:460px">
+        <div class="scan-hero"></div>
+        <div class="eyebrow relative z-10">Voice channel</div>
+        <h2 class="font-display text-2xl font-bold mt-1 relative z-10">Tap to transmit</h2>
 
-    // File received by another WebSocket client (e.g., second open tab)
-    function _onFileReceived(m) {
-      const dlUrl = `/uploads/${encodeURIComponent(m.name)}?token=${encodeURIComponent(_authToken)}`;
-      const card  = document.createElement('div');
-      card.className = 'msg-file';
-      card.innerHTML = `
-        <div class="fc-icon">${_fileIcon(m.name)}</div>
-        <div class="fc-meta">
-          <div class="fc-lbl">Received</div>
-          <div class="fc-name">${esc(m.name)}</div>
-          <div class="fc-size">${_fmtSize(m.size)}</div>
-          <a class="fc-dl" href="${dlUrl}" download="${esc(m.name)}">⬇ Download</a>
+        <div class="relative w-64 h-64 mx-auto my-8 grid place-items-center">
+          <div class="core-ring r1"></div>
+          <div class="core-ring r2"></div>
+          <div class="core-ring r3"></div>
+          <div class="orbit"><span class="particle"></span></div>
+          <div class="orbit rev"><span class="particle" style="background:#8B6BFF;box-shadow:0 0 10px rgba(139,107,255,.9)"></span></div>
+          <button id="big-mic" class="w-36 h-36 rounded-full grid place-items-center text-cyan1 relative z-10 transition"
+                  style="background:radial-gradient(circle,#0A0F1C 0%, #05070d 100%); border:1px solid rgba(0,229,255,.4); box-shadow:inset 0 0 36px rgba(0,229,255,.3), 0 0 50px rgba(0,229,255,.28);"
+                  title="Tap to speak">
+            ${svg(I.mic,'w-12 h-12')}
+          </button>
         </div>
-        <div class="fc-status done">✓</div>
-      `;
-      feed.appendChild(card);
-      feed.scrollTop = feed.scrollHeight;
-      toast('File received on computer!');
-    }
+        <div id="voice-hint" class="text-[13px] text-inkmed mt-2 relative z-10">Tap the mic — audio streams to JARVIS as 16 kHz PCM via encrypted WebSocket.</div>
 
-    // File input change handler
-    document.getElementById('file-inp').addEventListener('change', function () {
-      Array.from(this.files).forEach(_uploadFile);
-      this.value = ''; // reset so the same file can be re-sent
-    });
+        <div class="mt-8 flex items-center justify-center gap-1 h-10 relative z-10" id="voice-eq">
+          ${Array.from({length:18}).map((_,i)=>`<span class="eq-bar" style="height:${8+((i*5)%26)}px;animation-delay:${i*0.06}s"></span>`).join('')}
+        </div>
+      </div>
 
-    // ── Commands ──────────────────────────────────────────────────────────────
-    function doSend() {
-      const inp = document.getElementById('inp');
-      const txt = inp.value.trim();
-      if (!txt) return;
-      inp.value = '';
-      append('user', txt);
-      const enc  = _encrypt(txt);
-      const body = enc ? { enc } : { text: txt };
-      _authFetch('/api/command', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body)
+      <div class="glass rounded-2xl p-5 flex flex-col">
+        <div class="flex items-center justify-between mb-3">
+          <div class="eyebrow">Transcript · live</div>
+          <span class="chip cyan"><span class="dot cyan pulse"></span>LIVE</span>
+        </div>
+        <div id="v-transcript" class="scroll overflow-y-auto flex flex-col gap-2 -mr-2 pr-2" style="max-height:64vh"></div>
+      </div>
+    </div>
+  `;
+  const bigMic = document.getElementById('big-mic');
+  wireMic(bigMic, {big:true});
+
+  const tr = document.getElementById('v-transcript');
+  function renderTranscript(){
+    const logs = State.history.filter(m=>m.type==='log').slice(-30);
+    if(!logs.length){ tr.innerHTML = emptyBlock('No voice activity yet','Speak or send a command to start the log.'); return; }
+    tr.innerHTML = logs.map(m=>`
+      <div class="msg ${m.speaker==='jarvis'?'msg-j':'msg-u'}" style="max-width:100%">
+        <div class="lbl">${m.speaker==='jarvis'?'Jarvis':'You'}</div>${esc(m.text||'')}
+      </div>`).join('');
+    tr.scrollTop = tr.scrollHeight;
+  }
+  renderTranscript();
+  _feedHooks.push(renderTranscript);
+};
+
+/* ───────── Memory ───────── */
+Views.memory = async (host, my) => {
+  const data = await _getJSON('/api/data/memory') || {items:[]};
+  if(!fresh(my)) return;
+  const items = data.items || [];
+  const categories = {};
+  for(const r of items){
+    const c = r.category || 'notes';
+    (categories[c] ||= []).push(r);
+  }
+  const cats = Object.keys(categories).sort();
+  host.innerHTML = `
+    ${pageHeader('Personal Memory',
+      `${items.length} fact${items.length===1?'':'s'} across ${cats.length} categor${cats.length===1?'y':'ies'}`,
+      `<input id="mem-q" class="glow-input rounded-xl px-4 py-2 text-[13px]" placeholder="Filter memory…" style="width:260px" />`)}
+    <div class="grid md:grid-cols-2 lg:grid-cols-3 gap-4 stagger" id="mem-grid">
+      ${cats.length? cats.map(c=>`
+        <div class="glass glass-hv rounded-2xl p-5">
+          <div class="flex items-center justify-between mb-4">
+            <div class="flex items-center gap-2.5">
+              <div class="w-7 h-7 rounded-lg grid place-items-center text-cyan1 shrink-0" style="background:rgba(0,229,255,.07);border:1px solid rgba(0,229,255,.22)">
+                ${svg(I.mem,'w-3.5 h-3.5')}
+              </div>
+              <div class="font-display font-semibold text-[14px] capitalize">${esc(c)}</div>
+            </div>
+            <div class="chip cyan">${categories[c].length}</div>
+          </div>
+          <ul class="space-y-2.5 text-[13px]" data-cat="${esc(c)}">
+            ${categories[c].map(r=>`
+              <li class="flex justify-between gap-3 py-1.5 border-b border-white/5 last:border-b-0" data-k="${esc((r.key||'').toLowerCase())}" data-v="${esc(String(r.value||'').toLowerCase())}">
+                <div class="min-w-0">
+                  <div class="text-inkdim text-[10px] uppercase tracking-wider font-bold">${esc(r.key||'')}</div>
+                  <div class="truncate text-ink" title="${esc(r.value||'')}">${esc(r.value||'')}</div>
+                </div>
+                <div class="text-[10px] text-inkdim shrink-0 mono">${esc(fmtRelative(r.updated))}</div>
+              </li>`).join('')}
+          </ul>
+        </div>`).join('')
+      : emptyBlock('Memory is empty','JARVIS stores facts as you teach it.')}
+    </div>
+  `;
+  const q = document.getElementById('mem-q');
+  if(q){
+    q.oninput = () => {
+      const needle = q.value.trim().toLowerCase();
+      document.querySelectorAll('[data-cat] li').forEach(li=>{
+        const hit = !needle || li.dataset.k.includes(needle) || li.dataset.v.includes(needle);
+        li.style.display = hit ? '' : 'none';
       });
-    }
+    };
+  }
+};
 
-    function doWake() {
-      sys('Sending wake signal…');
-      _authFetch('/api/wake', { method: 'POST' });
-    }
+/* ───────── Journal ───────── */
+Views.journal = async (host, my) => {
+  const data = await _getJSON('/api/data/journal?limit=200') || {items:[]};
+  if(!fresh(my)) return;
+  const items = (data.items||[]).reverse();
+  const fmtArgs = a => {
+    if(!a || typeof a !== 'object') return '';
+    const entries = Object.entries(a).slice(0,4);
+    return entries.map(([k,v])=>{
+      let s = typeof v === 'string' ? v : JSON.stringify(v);
+      if(s.length > 60) s = s.slice(0,58)+'…';
+      return `<span class="chip mono"><span class="text-inkdim mr-1">${esc(k)}</span>${esc(s)}</span>`;
+    }).join(' ');
+  };
+  const fmtResult = r => {
+    if(r == null) return '';
+    const s = typeof r === 'string' ? r : JSON.stringify(r);
+    return esc(s.length > 200 ? s.slice(0,198)+'…' : s);
+  };
+  const colorFor = ev => {
+    if(!ev) return {t:'text-inkmed',d:'idle'};
+    if(ev.includes('result')) return {t:'text-mint',d:'mint'};
+    if(ev.includes('call'))   return {t:'text-cyan1',d:'cyan'};
+    if(ev.includes('error'))  return {t:'text-crimson',d:'crimson'};
+    return {t:'text-inkmed',d:'idle'};
+  };
+  host.innerHTML = `
+    ${pageHeader('Journal',
+      `${items.length} event${items.length===1?'':'s'} recorded today`,
+      `<div class="flex gap-1.5">
+        <span class="chip cyan"><span class="dot cyan"></span>call</span>
+        <span class="chip mint"><span class="dot mint"></span>result</span>
+        <span class="chip crimson"><span class="dot crimson"></span>error</span>
+      </div>`)}
+    <div class="glass rounded-2xl overflow-hidden">
+      ${items.length ? `<div class="divide-y divide-white/5">
+        ${items.map(ev=>{
+          const time = (ev.ts||'').slice(11,19) || '--:--';
+          const et = ev.event||'event';
+          const c = colorFor(et);
+          return `
+          <div class="grid grid-cols-[72px_14px_1fr] gap-3 px-4 py-3 hover:bg-white/[.018] transition">
+            <div class="mono text-[11.5px] text-inkdim pt-1">${esc(time)}</div>
+            <div class="flex items-start pt-1.5"><span class="dot ${c.d}"></span></div>
+            <div class="min-w-0">
+              <div class="flex items-center gap-2 flex-wrap mb-1">
+                <span class="text-[10px] uppercase tracking-wider font-bold ${c.t}">${esc(et.replace(/_/g,' '))}</span>
+                ${ev.tool ? `<span class="chip">${esc(ev.tool)}</span>` : ''}
+              </div>
+              ${ev.args ? `<div class="flex flex-wrap gap-1.5 mb-1.5">${fmtArgs(ev.args)}</div>` : ''}
+              ${ev.result != null ? `<div class="text-[12.5px] text-inkmed break-words"><span class="text-cyan1">↳</span> ${fmtResult(ev.result)}</div>` : ''}
+              ${(!ev.args && !ev.result && ev.text) ? `<div class="text-[13px] text-ink break-words">${esc(ev.text)}</div>` : ''}
+            </div>
+          </div>`;
+        }).join('')}</div>`
+      : emptyBlock('No journal entries yet','Tool calls and events will appear here.')}
+    </div>
+  `;
+};
 
-    document.getElementById('inp').addEventListener('keydown', e => {
-      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doSend(); }
+/* ───────── Tasks ───────── */
+Views.tasks = async (host, my) => {
+  const [todos, agent] = await Promise.all([
+    _getJSON('/api/data/todos'),
+    _getJSON('/api/data/tasks'),
+  ]);
+  if(!fresh(my)) return;
+  const todoItems  = (todos && todos.items) || [];
+  const agentItems = (agent && agent.items) || [];
+  const openTodos = todoItems.filter(t=>!t.done).length;
+  const doneTodos = todoItems.filter(t=>t.done).length;
+  host.innerHTML = `
+    ${pageHeader('Tasks','Your todos and JARVIS\'s own agent plans.',
+      `<button class="btn-cyan rounded-xl px-4 py-2 text-[11.5px] font-bold tracking-wider" onclick="quickAdd('todo')">+ NEW TODO</button>`)}
+
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-5">
+      ${statTile({label:'Open', value: openTodos, foot:'todos pending', icon:'task'})}
+      ${statTile({label:'Done', value: doneTodos, foot:'completed', icon:'spark', kind:'mint'})}
+      ${statTile({label:'Agent queue', value: agentItems.length, foot:'total plans', icon:'bolt'})}
+      ${statTile({label:'Running', value: agentItems.filter(t=>t.status==='running').length, foot:'in progress', icon:'radar', kind:'cyan'})}
+    </div>
+
+    <div class="grid lg:grid-cols-2 gap-5">
+      <div class="glass rounded-2xl p-5">
+        <div class="flex items-center justify-between mb-4">
+          <div>
+            <div class="eyebrow">To-dos</div>
+            <div class="font-display font-semibold text-[16px] mt-0.5">Your action items</div>
+          </div>
+          <button class="btn-ghost rounded-lg px-3 py-1.5 text-[10.5px] font-bold tracking-[.14em]" onclick="quickAdd('todo')">+ NEW</button>
+        </div>
+        <div class="space-y-1.5 stagger">
+          ${todoItems.length ? todoItems.map(t=>`
+            <div class="flex items-center gap-3 rounded-xl px-3 py-2.5 ${t.done?'opacity-50':''} hover:bg-white/[.025] transition border border-transparent hover:border-white/5">
+              <span class="dot ${t.done?'mint':'idle'}"></span>
+              <div class="min-w-0 flex-1">
+                <div class="text-[13.5px] ${t.done?'line-through':''}">${esc(t.text||'')}</div>
+                <div class="text-[10.5px] text-inkdim mt-0.5 mono">${esc(t.list||'todo')} · ${t.due?('due '+t.due):'no due'}</div>
+              </div>
+              <span class="chip ${t.priority>=2?'amber':t.priority>=1?'cyan':''}">${t.priority>=2?'HIGH':t.priority>=1?'MED':'LOW'}</span>
+            </div>`).join('')
+          : emptyBlock('No todos','Ask JARVIS: "add buy groceries to my todos".')}
+        </div>
+      </div>
+
+      <div class="glass rounded-2xl p-5">
+        <div class="flex items-center justify-between mb-4">
+          <div>
+            <div class="eyebrow">Agent plans</div>
+            <div class="font-display font-semibold text-[16px] mt-0.5">JARVIS task queue</div>
+          </div>
+          <span class="chip">${agentItems.length}</span>
+        </div>
+        <div class="space-y-2 stagger">
+          ${agentItems.length ? agentItems.map(t=>{
+            const st = t.status||'planned';
+            const chipCls = st==='done'?'mint':st==='running'?'cyan':st==='failed'?'crimson':st==='awaiting_user'?'amber':'';
+            return `
+            <div class="rounded-xl p-3.5 border border-white/5 bg-white/[.018] hover:border-white/10 transition">
+              <div class="flex items-start justify-between gap-3">
+                <div class="min-w-0">
+                  <div class="text-[13.5px] font-medium">${esc(t.goal||'(no goal)')}</div>
+                  <div class="text-[10.5px] text-inkdim mt-1 mono">#${t.id} · ${esc(fmtRelative(t.updated_at||t.created_at))}</div>
+                </div>
+                <span class="chip ${chipCls}">${esc(st)}</span>
+              </div>
+            </div>`;
+          }).join('')
+          : emptyBlock('No agent tasks','High-level plans dispatched by JARVIS will show here.')}
+        </div>
+      </div>
+    </div>
+  `;
+};
+function quickAdd(kind){
+  const text = prompt(kind==='todo' ? 'Add a todo:' : 'Command:');
+  if(text && text.trim()){
+    sendCommand(kind==='todo' ? `add ${text.trim()} to my todos` : text.trim());
+    toast('Command sent');
+  }
+}
+
+/* ───────── Projects ───────── */
+Views.projects = async (host, my) => {
+  const data = await _getJSON('/api/data/projects') || {items:[]};
+  if(!fresh(my)) return;
+  const items = data.items || [];
+  const active = items.filter(x=>x.project.status==='active').length;
+  const done = items.filter(x=>x.project.status==='done').length;
+  host.innerHTML = `
+    ${pageHeader('Projects',`${items.length} project${items.length===1?'':'s'} tracked · ${active} active · ${done} delivered`)}
+    <div class="grid md:grid-cols-2 gap-4 stagger">
+      ${items.length ? items.map(({project:p, summary:s})=>{
+        const pct = Math.round(s.completion_percent || 0);
+        const stCls = p.status==='active'?'mint':p.status==='on_hold'?'amber':p.status==='done'?'cyan':p.status==='cancelled'?'crimson':'';
+        return `<div class="glass glass-hv rounded-2xl p-5 relative overflow-hidden">
+          <div class="flex items-start justify-between gap-3 mb-4">
+            <div class="min-w-0 flex-1">
+              <div class="font-display font-semibold text-[16.5px] tracking-tight">${esc(p.name)}</div>
+              <div class="text-[12px] text-inkdim mt-1 line-clamp-2">${esc(p.description||'No description.')}</div>
+            </div>
+            <div class="relative shrink-0">
+              ${ringProgress(pct, 54)}
+              <div class="absolute inset-0 grid place-items-center text-[11px] font-bold mono text-ink">${pct}%</div>
+            </div>
+          </div>
+          <div class="flex items-center justify-between text-[11px] text-inkdim mb-2">
+            <span class="chip ${stCls}">${esc(p.status||'')}</span>
+            <span class="mono">${s.total_tasks||0} task${(s.total_tasks||0)===1?'':'s'}</span>
+          </div>
+          <div class="bar-track mb-2"><div class="bar-fill ${p.status==='on_hold'?'amber':p.status==='done'?'mint':''}" style="width:${pct}%"></div></div>
+          ${s.next_milestone ? `<div class="mt-3 text-[12px] pt-3 border-t border-white/5"><div class="eyebrow mb-1">Next milestone</div><div class="text-ink text-[13px]">${esc(s.next_milestone.name)}</div><div class="text-inkdim text-[11px] mono">${esc(s.next_milestone.target_date||'no date')}</div></div>` : ''}
+        </div>`;
+      }).join('')
+      : emptyBlock('No projects yet','Create projects via voice: "start a project called Mark LVI".')}
+    </div>
+  `;
+};
+
+/* ───────── Commitments ───────── */
+Views.commitments = async (host, my) => {
+  const data = await _getJSON('/api/data/commitments') || {};
+  if(!fresh(my)) return;
+  const open = data.open || [];
+  const due  = data.due_24h || [];
+  host.innerHTML = `
+    ${pageHeader('Commitments','Promises and follow-ups JARVIS is tracking for you.')}
+    <div class="grid lg:grid-cols-2 gap-5">
+      <div class="glass rounded-2xl p-6 stroke-cy relative overflow-hidden ${due.length?'':''}">
+        ${due.length?`<div class="absolute top-0 right-0 w-24 h-24 pointer-events-none" style="background:radial-gradient(circle at top right, rgba(255,184,78,.2) 0%, transparent 70%)"></div>`:''}
+        <div class="flex items-center gap-2 mb-4 relative z-10">
+          <div class="w-9 h-9 rounded-lg grid place-items-center text-amber" style="background:rgba(255,184,78,.08);border:1px solid rgba(255,184,78,.3)">
+            ${svg(I.spark,'w-4 h-4')}
+          </div>
+          <div>
+            <div class="eyebrow">Due within 24h</div>
+            <div class="font-display font-semibold text-[15px] mt-0.5">${due.length} urgent</div>
+          </div>
+        </div>
+        <div class="space-y-2 relative z-10">
+          ${due.length ? due.map(c=>`
+            <div class="rounded-xl p-3.5 border border-amber/30 bg-amber/5">
+              <div class="flex justify-between gap-3">
+                <div class="min-w-0">
+                  <div class="text-[13.5px]">${esc(c.text||'')}</div>
+                  <div class="text-[10.5px] text-inkdim mt-1 mono">due ${esc(fmtRelative(c.due_ts))}</div>
+                </div>
+                <span class="chip amber"><span class="dot amber pulse"></span>URGENT</span>
+              </div>
+            </div>`).join('')
+          : `<div class="text-[13px] text-inkmed py-4">Nothing urgent in the next 24 hours.</div>`}
+        </div>
+      </div>
+
+      <div class="glass rounded-2xl p-6">
+        <div class="flex items-center gap-2 mb-4">
+          <div class="w-9 h-9 rounded-lg grid place-items-center text-cyan1" style="background:rgba(0,229,255,.07);border:1px solid rgba(0,229,255,.22)">
+            ${svg(I.book,'w-4 h-4')}
+          </div>
+          <div>
+            <div class="eyebrow">All open</div>
+            <div class="font-display font-semibold text-[15px] mt-0.5">${open.length} tracked</div>
+          </div>
+        </div>
+        <div class="space-y-2">
+          ${open.length ? open.map(c=>`
+            <div class="rounded-xl p-3.5 border border-white/5 hover:border-white/10 transition">
+              <div class="flex justify-between gap-3">
+                <div class="min-w-0">
+                  <div class="text-[13.5px]">${esc(c.text||'')}</div>
+                  <div class="text-[10.5px] text-inkdim mt-1 mono">${esc(c.source||'')} · ${c.due_ts?('due '+fmtRelative(c.due_ts)):'no due'}</div>
+                </div>
+                <span class="chip">OPEN</span>
+              </div>
+            </div>`).join('')
+          : emptyBlock('No open commitments','When JARVIS detects a promise, it lands here.')}
+        </div>
+      </div>
+    </div>
+  `;
+};
+
+/* ───────── Contacts ───────── */
+Views.contacts = async (host, my) => {
+  const data = await _getJSON('/api/data/contacts') || {};
+  if(!fresh(my)) return;
+  const contacts = data.contacts || [];
+  const follow = data.follow_ups || [];
+  const stats  = data.stats || {};
+  host.innerHTML = `
+    ${pageHeader('Contacts & Relationships', `${contacts.length} contacts · ${follow.length} follow-ups due.`)}
+    <div class="grid lg:grid-cols-[1fr,320px] gap-5">
+      <div class="glass rounded-2xl overflow-hidden">
+        ${contacts.length ? `<table class="data-table">
+          <thead><tr><th>Name</th><th>Tier</th><th>Org / Role</th><th>Last seen</th></tr></thead>
+          <tbody>
+            ${contacts.map(c=>{
+              const initials = (c.name||'').split(' ').map(x=>x[0]).join('').slice(0,2).toUpperCase() || '?';
+              return `<tr>
+                <td>
+                  <div class="flex items-center gap-3">
+                    <div class="w-8 h-8 rounded-lg grid place-items-center text-[10px] font-bold text-cyan1 shrink-0" style="background:rgba(0,229,255,.07);border:1px solid rgba(0,229,255,.22)">${esc(initials)}</div>
+                    <div class="min-w-0">
+                      <div class="font-medium">${esc(c.name||'')}</div>
+                      <div class="text-[11px] text-inkdim">${esc(c.email||c.phone||'—')}</div>
+                    </div>
+                  </div>
+                </td>
+                <td><span class="chip ${c.tier==='inner'?'cyan':c.tier==='team'?'mint':''}">${esc(c.tier||'—')}</span></td>
+                <td class="text-inkmed">${esc([c.org,c.role].filter(Boolean).join(' · ')||'—')}</td>
+                <td class="text-inkdim mono text-[11.5px]">${esc(fmtRelative(c.last_seen))}</td>
+              </tr>`;
+            }).join('')}
+          </tbody>
+        </table>`
+        : emptyBlock('No contacts yet','Add via voice: "remember that Sarah is on my team".')}
+      </div>
+      <div class="flex flex-col gap-4">
+        <div class="glass rounded-2xl p-5">
+          <div class="eyebrow mb-3">Overview</div>
+          <div class="space-y-2.5 text-[13px]">
+            ${Object.entries(stats.contacts_by_tier || {}).map(([k,v])=>`
+              <div class="flex justify-between items-center"><span class="text-inkdim capitalize">${esc(k)}</span><span class="font-bold text-ink">${v}</span></div>`).join('') || '<span class="text-inkdim">—</span>'}
+            <div class="flex justify-between pt-3 border-t border-white/5"><span class="text-inkdim">Interactions</span><span class="font-bold text-ink">${stats.interactions||0}</span></div>
+          </div>
+        </div>
+        <div class="glass rounded-2xl p-5">
+          <div class="eyebrow mb-3">Follow-ups due</div>
+          <ul class="space-y-2 text-[13px]">
+            ${follow.length ? follow.slice(0,8).map(f=>`
+              <li class="flex justify-between gap-2 items-center py-1.5 border-b border-white/5 last:border-b-0">
+                <span class="truncate">${esc(f.contact_name||'(unknown)')}</span>
+                <span class="chip amber">${esc(f.status||'open')}</span>
+              </li>`).join('')
+            : '<li class="text-inkdim">None due.</li>'}
+          </ul>
+        </div>
+      </div>
+    </div>
+  `;
+};
+
+/* ───────── Calendar ───────── */
+Views.calendar = async (host, my) => {
+  if(!fresh(my)) return;
+  const now = new Date();
+  const day = now.getDay();
+  const days = ['SUN','MON','TUE','WED','THU','FRI','SAT'];
+  host.innerHTML = `
+    ${pageHeader('Calendar & Schedule','OS calendar access is driven on-demand via the assistant.')}
+    <div class="grid lg:grid-cols-3 gap-5">
+      <div class="glass rounded-2xl p-6 lg:col-span-2 relative overflow-hidden">
+        <div class="eyebrow mb-2">Today</div>
+        <div class="font-display text-[34px] font-bold tracking-tight leading-none">${now.toLocaleDateString(undefined,{weekday:'long'})}</div>
+        <div class="font-display text-[46px] font-bold text-cyan1 tracking-tight leading-none mt-1" style="text-shadow:0 0 30px rgba(0,229,255,.4)">${now.toLocaleDateString(undefined,{month:'long',day:'numeric'})}</div>
+
+        <div class="grid grid-cols-7 gap-2 mt-7">
+          ${days.map((d,i)=>{
+            const sel = i===day;
+            return `<div class="rounded-xl p-3 text-center ${sel?'bg-cyan1/10 border border-cyan1/30':'border border-white/5'}">
+              <div class="text-[9px] uppercase tracking-wider font-bold ${sel?'text-cyan1':'text-inkdim'}">${d}</div>
+              <div class="text-[16px] font-bold mt-1 ${sel?'text-cyan1':'text-inkmed'}">${(()=>{const dt=new Date(now);dt.setDate(now.getDate()-day+i);return dt.getDate();})()}</div>
+            </div>`;
+          }).join('')}
+        </div>
+
+        <p class="text-[13px] text-inkmed mt-5 leading-relaxed">
+          JARVIS queries your OS calendar via voice ("what's on my calendar today?"). Events come live from macOS Calendar.app or equivalent — not cached in the dashboard.
+        </p>
+        <button class="btn-cyan rounded-xl px-5 py-2.5 text-[11.5px] font-bold tracking-[.14em] mt-5 inline-flex items-center gap-2" onclick="sendCommand('what is on my calendar today?');toast('Asked JARVIS');">
+          ${svg(I.cal,'w-4 h-4')} Ask JARVIS now
+        </button>
+      </div>
+      <div class="glass rounded-2xl p-5">
+        <div class="eyebrow mb-3">Quick prompts</div>
+        <ul class="space-y-1.5 text-[13px]">
+          ${['what meetings do I have tomorrow?','schedule a review Friday 3pm','prep my next meeting','what is my week looking like?'].map(p=>`
+            <li><button class="w-full text-left rounded-lg px-3 py-2.5 text-[12.5px] text-inkmed hover:text-ink hover:bg-white/[.03] transition border border-transparent hover:border-white/5" onclick="sendCommand('${esc(p)}');toast('Sent');">${esc(p)}</button></li>`).join('')}
+        </ul>
+      </div>
+    </div>
+  `;
+};
+
+/* ───────── Finance ───────── */
+Views.finance = async (host, my) => {
+  const data = await _getJSON('/api/data/finance') || {};
+  if(!fresh(my)) return;
+  const monthly  = data.monthly || {};
+  const budgets  = data.budgets || [];
+  const bills    = data.bills   || [];
+  const expenses = data.expenses|| [];
+  const subs     = data.subs    || [];
+  const totals   = monthly.totals || {};
+  const totalLine = Object.entries(totals).map(([c,v])=>`${c} ${(+v).toFixed(2)}`).join(' · ') || '$0.00';
+
+  // Category aggregates for donut
+  const catAgg = {};
+  for(const e of expenses){
+    const k = e.category || 'other';
+    catAgg[k] = (catAgg[k]||0) + (+e.amount||0);
+  }
+  const donutData = Object.entries(catAgg).map(([k,v])=>({label:k,v}));
+  const topCategory = donutData.sort((a,b)=>b.v-a.v)[0];
+
+  host.innerHTML = `
+    ${pageHeader('Finance & Expenses','This month\'s spending, active subscriptions and upcoming bills.')}
+
+    <div class="grid md:grid-cols-3 gap-4 mb-6">
+      ${statTile({label:'Month spend', value:totalLine, foot:`${monthly.count||0} transactions`, icon:'cash'})}
+      ${statTile({label:'Upcoming bills', value:bills.length, foot:'within 14 days', icon:'spark', kind: bills.length?'amber':'mint'})}
+      ${statTile({label:'Active subs', value:subs.length, foot: Object.entries(data.sub_monthly||{}).map(([c,v])=>`${c} ${(+v).toFixed(2)}/mo`).join(' · ')||'—', icon:'bolt'})}
+    </div>
+
+    <div class="grid lg:grid-cols-3 gap-5">
+      <div class="glass rounded-2xl p-6">
+        <div class="eyebrow mb-4">Category breakdown</div>
+        ${donutData.length ? `
+          <div class="donut-wrap">
+            ${donutChart(donutData,170)}
+            <div class="label">
+              <div class="text-[10px] uppercase tracking-wider text-inkdim font-bold">Top</div>
+              <div class="text-[14px] font-bold text-ink capitalize mt-0.5">${esc(topCategory?.label||'—')}</div>
+              <div class="text-[11px] text-inkdim mono mt-0.5">${(+(topCategory?.v||0)).toFixed(2)}</div>
+            </div>
+          </div>
+          <div class="mt-4 space-y-1.5 text-[12px]">
+            ${donutData.slice(0,5).map((d,i)=>{
+              const col = ['#00E5FF','#3D7EFF','#8B6BFF','#40E39F','#FFB84E','#FF6B6B'][i%6];
+              return `<div class="flex items-center justify-between py-1">
+                <div class="flex items-center gap-2">
+                  <span class="w-2.5 h-2.5 rounded-full shrink-0" style="background:${col};box-shadow:0 0 8px ${col}66"></span>
+                  <span class="capitalize">${esc(d.label)}</span>
+                </div>
+                <span class="mono text-inkdim">${(+d.v).toFixed(2)}</span>
+              </div>`;
+            }).join('')}
+          </div>
+        ` : emptyBlock('No spending data','Log expenses via voice to see the breakdown.')}
+      </div>
+
+      <div class="glass rounded-2xl p-6 lg:col-span-2">
+        <div class="eyebrow mb-4">Budgets</div>
+        ${budgets.length ? budgets.map(b=>{
+          const pct = Math.min(100, Math.round((b.pct||0)*100)/100);
+          const cls = b.over ? 'crimson' : pct>80 ? 'amber' : 'mint';
+          return `<div class="mb-4 last:mb-0">
+            <div class="flex justify-between text-[12.5px] mb-1.5">
+              <span class="capitalize font-semibold">${esc(b.category)}</span>
+              <span class="${b.over?'text-crimson':'text-inkmed'} mono">${esc(b.currency)} ${(+b.spent).toFixed(2)} / ${(+b.budget).toFixed(2)}</span>
+            </div>
+            <div class="bar-track"><div class="bar-fill ${cls}" style="width:${Math.min(100,pct)}%"></div></div>
+          </div>`;
+        }).join('') : emptyBlock('No budgets set','Tell JARVIS: "set a 500 USD groceries budget".')}
+      </div>
+
+      <div class="glass rounded-2xl p-6">
+        <div class="eyebrow mb-4">Upcoming bills</div>
+        ${bills.length ? `<div class="space-y-1">${bills.map(b=>`
+          <div class="flex justify-between py-2.5 border-b border-white/5 last:border-b-0">
+            <div class="min-w-0">
+              <div class="text-[13.5px]">${esc(b.name)}</div>
+              <div class="text-[10.5px] text-inkdim mono mt-0.5">due ${esc(b.due_date||'—')}</div>
+            </div>
+            <div class="text-[13px] font-bold mono">${esc(b.currency||'')} ${(+(b.amount||0)).toFixed(2)}</div>
+          </div>`).join('')}</div>` : emptyBlock('No upcoming bills','')}
+      </div>
+
+      <div class="glass rounded-2xl p-6 lg:col-span-2">
+        <div class="eyebrow mb-4">Recent expenses</div>
+        ${expenses.length ? `<table class="data-table">
+          <thead><tr><th>Date</th><th>Category</th><th>Merchant</th><th class="text-right">Amount</th></tr></thead>
+          <tbody>
+            ${expenses.slice(0,12).map(e=>`
+              <tr>
+                <td class="text-inkdim mono text-[11.5px]">${esc(e.date||'')}</td>
+                <td class="capitalize"><span class="chip">${esc(e.category||'—')}</span></td>
+                <td>${esc(e.merchant||'—')}</td>
+                <td class="text-right mono font-semibold">${esc(e.currency||'')} ${(+(e.amount||0)).toFixed(2)}</td>
+              </tr>`).join('')}
+          </tbody></table>` : emptyBlock('No expenses recorded','')}
+      </div>
+    </div>
+  `;
+};
+
+/* ───────── Travel ───────── */
+Views.travel = async (host, my) => {
+  const data = await _getJSON('/api/data/trips') || {};
+  if(!fresh(my)) return;
+  const upcoming = data.upcoming || [];
+  const all = data.all || [];
+
+  host.innerHTML = `
+    ${pageHeader('Travel',`${upcoming.length} upcoming · ${all.length} total.`)}
+    <div class="grid lg:grid-cols-2 gap-5">
+      <div class="glass rounded-2xl p-6">
+        <div class="flex items-center gap-2 mb-4">
+          <div class="w-9 h-9 rounded-lg grid place-items-center text-cyan1" style="background:rgba(0,229,255,.07);border:1px solid rgba(0,229,255,.22)">
+            ${svg(I.plane,'w-4 h-4')}
+          </div>
+          <div>
+            <div class="eyebrow">Upcoming (90 days)</div>
+            <div class="font-display font-semibold text-[15px] mt-0.5">${upcoming.length} trip${upcoming.length===1?'':'s'}</div>
+          </div>
+        </div>
+        <div class="space-y-3 stagger">
+          ${upcoming.length ? upcoming.map(t=>`
+            <div class="rounded-xl p-4 border border-white/5 bg-white/[.018] hover:border-cyan1/25 transition">
+              <div class="flex items-start justify-between gap-3 mb-2">
+                <div class="min-w-0">
+                  <div class="font-display font-semibold text-[15px]">${esc(t.name||t.destination||'Trip')}</div>
+                  <div class="text-[11px] text-inkdim mt-1 mono flex items-center gap-1.5">
+                    <svg class="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a9 9 0 0 0-9 9c0 7 9 13 9 13s9-6 9-13a9 9 0 0 0-9-9z"/><circle cx="12" cy="11" r="3"/></svg>
+                    ${esc(t.destination||'—')}
+                  </div>
+                </div>
+                <span class="chip cyan">${esc(t.status||'')}</span>
+              </div>
+              <div class="flex items-center gap-2 text-[11.5px] text-inkmed mono">
+                <span>${esc(t.start_date||'—')}</span>
+                ${svg(I.arrow,'w-3 h-3 text-inkdim')}
+                <span>${esc(t.end_date||'—')}</span>
+              </div>
+            </div>`).join('') : emptyBlock('No upcoming trips','')}
+        </div>
+      </div>
+
+      <div class="glass rounded-2xl p-6">
+        <div class="eyebrow mb-4">All trips</div>
+        ${all.length ? `<table class="data-table">
+          <thead><tr><th>Name</th><th>Destination</th><th>Dates</th><th>Status</th></tr></thead>
+          <tbody>${all.map(t=>`
+            <tr>
+              <td class="font-medium">${esc(t.name||'')}</td>
+              <td class="text-inkmed">${esc(t.destination||'—')}</td>
+              <td class="text-inkdim mono text-[11.5px]">${esc(t.start_date||'')} / ${esc(t.end_date||'')}</td>
+              <td><span class="chip ${t.status==='in_progress'?'mint':t.status==='booked'?'cyan':''}">${esc(t.status||'')}</span></td>
+            </tr>`).join('')}</tbody>
+        </table>` : emptyBlock('No trips recorded','')}
+      </div>
+    </div>
+  `;
+};
+
+/* ───────── Agents ───────── */
+Views.agents = async (host, my) => {
+  const data = await _getJSON('/api/data/tasks?limit=200') || {items:[]};
+  if(!fresh(my)) return;
+  const items = data.items || [];
+  const by = {};
+  for(const t of items){
+    const s = t.status||'unknown';
+    (by[s] ||= []).push(t);
+  }
+  const order = [
+    {k:'running',       cls:'cyan',    label:'Running'},
+    {k:'awaiting_user', cls:'amber',   label:'Awaiting'},
+    {k:'planned',       cls:'',        label:'Planned'},
+    {k:'done',          cls:'mint',    label:'Done'},
+    {k:'failed',        cls:'crimson', label:'Failed'},
+    {k:'cancelled',     cls:'',        label:'Cancelled'},
+  ];
+  host.innerHTML = `
+    ${pageHeader('AI Agents','JARVIS\'s own plan queue. Real execution tracked here — nothing simulated.')}
+
+    <div class="grid grid-cols-2 md:grid-cols-6 gap-3 mb-6">
+      ${order.map(s=>{
+        const n = (by[s.k]||[]).length;
+        return `<div class="glass glass-hv rounded-xl p-4 cursor-default">
+          <div class="flex items-center gap-2 mb-2">
+            <span class="dot ${s.cls||'idle'}${s.k==='running'?' pulse':''}"></span>
+            <div class="eyebrow">${esc(s.label)}</div>
+          </div>
+          <div class="font-display text-[26px] font-bold leading-none">${n}</div>
+        </div>`;
+      }).join('')}
+    </div>
+
+    <div class="glass rounded-2xl overflow-hidden">
+      <div class="px-5 py-4 border-b border-white/5 flex items-center justify-between">
+        <div class="font-display font-semibold text-[15px]">Task queue</div>
+        <div class="flex items-center gap-2 text-[11px] text-inkdim">
+          <span class="dot cyan pulse"></span>
+          <span>Live tracked</span>
+        </div>
+      </div>
+      ${items.length ? `<table class="data-table">
+        <thead><tr><th>#</th><th>Goal</th><th>Status</th><th>Updated</th></tr></thead>
+        <tbody>${items.map(t=>{
+          const st = t.status||'planned';
+          const cls = st==='running'?'cyan':st==='done'?'mint':st==='failed'?'crimson':st==='awaiting_user'?'amber':'';
+          return `<tr>
+            <td class="mono text-inkdim">#${esc(t.id)}</td>
+            <td class="font-medium">${esc(t.goal||'')}</td>
+            <td><span class="chip ${cls}">${st==='running'?'<span class="dot cyan"></span>':''}${esc(st)}</span></td>
+            <td class="text-inkdim mono text-[11.5px]">${esc(fmtRelative(t.updated_at||t.created_at))}</td>
+          </tr>`;
+        }).join('')}</tbody>
+      </table>`
+      : emptyBlock('No agent tasks yet','Ask JARVIS to execute a multi-step goal.')}
+    </div>
+  `;
+};
+
+/* ───────── Intelligence ───────── */
+Views.intelligence = async (host, my) => {
+  if(!fresh(my)) return;
+  host.innerHTML = `
+    ${pageHeader('Intelligence','Semantic search across your embedded memory.')}
+    <div class="glass rounded-2xl p-6">
+      <div class="flex gap-2 mb-5">
+        <div class="relative flex-1">
+          <svg class="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-inkdim pointer-events-none" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+          <input id="vq" class="glow-input w-full rounded-xl pl-10 pr-4 py-2.5 text-[13px]" placeholder="Search embedded snippets — press Enter"/>
+        </div>
+        <button id="vgo" class="btn-cyan rounded-xl px-5 py-2.5 text-[11.5px] font-bold tracking-[.14em] flex items-center gap-2">
+          SEARCH ${svg(I.arrow,'w-3.5 h-3.5')}
+        </button>
+      </div>
+      <div id="vcount" class="text-[11.5px] text-inkdim mb-4 mono"></div>
+      <div id="vres" class="space-y-2 stagger"></div>
+    </div>
+  `;
+  const base = await _getJSON('/api/data/vectors') || {count:0};
+  if(!fresh(my)) return;
+  const vc = document.getElementById('vcount');
+  if(vc) vc.innerHTML = `<span class="dot cyan"></span> ${base.count||0} snippet${base.count===1?'':'s'} indexed.`;
+
+  async function run(){
+    const q = document.getElementById('vq').value.trim();
+    if(!q) return;
+    const res = document.getElementById('vres');
+    res.innerHTML = '<div class="empty">Searching…</div>';
+    const d = await _getJSON('/api/data/vectors?q='+encodeURIComponent(q)+'&limit=12') || {results:[]};
+    const r = d.results || [];
+    res.innerHTML = r.length ? r.map(x=>{
+      const score = +(x.score||0);
+      const pct = Math.round(Math.min(1, Math.max(0, score))*100);
+      return `<div class="rounded-xl p-4 border border-white/5 bg-white/[.018] hover:border-cyan1/25 transition">
+        <div class="flex justify-between text-[11px] mb-2">
+          <span class="text-inkdim mono">${esc(x.source||'unknown')}</span>
+          <span class="text-cyan1 mono font-semibold">score ${score.toFixed(3)}</span>
+        </div>
+        <div class="bar-track mb-3" style="height:3px"><div class="bar-fill" style="width:${pct}%"></div></div>
+        <div class="text-[13px] text-ink leading-relaxed">${esc(x.text||'')}</div>
+      </div>`;
+    }).join('')
+      : emptyBlock('No matches','');
+  }
+  document.getElementById('vgo').onclick = run;
+  document.getElementById('vq').addEventListener('keydown', e=>{ if(e.key==='Enter') run(); });
+};
+
+/* ───────── Plugins ───────── */
+Views.plugins = async (host, my) => {
+  const data = await _getJSON('/api/data/modules') || {actions:[],plugins:[],core:[]};
+  if(!fresh(my)) return;
+  const renderList = (arr) => arr.length ? `<div class="grid md:grid-cols-2 gap-2 stagger">${arr.map(n=>`
+    <div class="rounded-lg px-3 py-2 border border-white/5 bg-white/[.015] text-[12px] mono text-inkmed hover:text-ink hover:border-cyan1/25 transition">${esc(n)}</div>`).join('')}</div>` : `<div class="text-inkdim text-[12px]">none</div>`;
+  host.innerHTML = `
+    ${pageHeader('Plugins & Actions','Bundled skills + user plugins discovered at launch.')}
+    <div class="grid lg:grid-cols-3 gap-5">
+      <div class="glass rounded-2xl p-6">
+        <div class="flex justify-between items-center mb-4">
+          <div class="flex items-center gap-2">
+            <div class="w-8 h-8 rounded-lg grid place-items-center text-cyan1" style="background:rgba(0,229,255,.07);border:1px solid rgba(0,229,255,.22)">${svg(I.bolt,'w-3.5 h-3.5')}</div>
+            <div>
+              <div class="eyebrow">Actions</div>
+              <div class="font-display font-semibold text-[14px]">callable skills</div>
+            </div>
+          </div>
+          <span class="chip cyan">${data.actions.length}</span>
+        </div>
+        ${renderList(data.actions)}
+      </div>
+      <div class="glass rounded-2xl p-6">
+        <div class="flex justify-between items-center mb-4">
+          <div class="flex items-center gap-2">
+            <div class="w-8 h-8 rounded-lg grid place-items-center text-violet" style="background:rgba(139,107,255,.07);border:1px solid rgba(139,107,255,.22)">${svg(I.plugs,'w-3.5 h-3.5')}</div>
+            <div>
+              <div class="eyebrow">Plugins</div>
+              <div class="font-display font-semibold text-[14px]">user extensions</div>
+            </div>
+          </div>
+          <span class="chip violet">${data.plugins.length}</span>
+        </div>
+        ${renderList(data.plugins)}
+      </div>
+      <div class="glass rounded-2xl p-6">
+        <div class="flex justify-between items-center mb-4">
+          <div class="flex items-center gap-2">
+            <div class="w-8 h-8 rounded-lg grid place-items-center text-mint" style="background:rgba(64,227,159,.07);border:1px solid rgba(64,227,159,.22)">${svg(I.chip,'w-3.5 h-3.5')}</div>
+            <div>
+              <div class="eyebrow">Core modules</div>
+              <div class="font-display font-semibold text-[14px]">runtime libs</div>
+            </div>
+          </div>
+          <span class="chip mint">${data.core.length}</span>
+        </div>
+        ${renderList(data.core)}
+      </div>
+    </div>
+  `;
+};
+
+/* ───────── System ───────── */
+Views.system = async (host, my) => {
+  const s = await _getJSON('/api/data/status') || {};
+  const o = await _getJSON('/api/data/overview') || {};
+  if(!fresh(my)) return;
+  host.innerHTML = `
+    ${pageHeader('System Monitoring','Dashboard server state and backend data counts.')}
+
+    <div class="grid md:grid-cols-4 gap-3 mb-6">
+      ${statTile({label:'Server',  value:`${s.ip||'—'}:${s.port||'—'}`, foot: s.ssl?'TLS secured':'plain HTTP', icon:'chip', kind: s.ssl?'mint':'amber'})}
+      ${statTile({label:'Clients', value: s.clients ?? 0, foot:'live WebSocket', icon:'radar', kind: (s.clients||0)>0?'cyan':null})}
+      ${statTile({label:'History', value: s.history ?? 0, foot:'messages buffered', icon:'book'})}
+      ${statTile({label:'Queued cmds', value: s.queued_commands ?? 0, foot:'awaiting dispatch', icon:'bolt'})}
+    </div>
+
+    <div class="grid lg:grid-cols-2 gap-5">
+      <div class="glass rounded-2xl p-6">
+        <div class="eyebrow mb-4">Data stores</div>
+        <div class="space-y-1.5">
+          ${[
+            ['Memory facts',o.memory?.total||0,'mem'],
+            ['Agent tasks',o.tasks?.count||0,'bolt'],
+            ['Todos',(o.todos?.open||0)+(o.todos?.done||0),'task'],
+            ['Projects',o.projects?.count||0,'folder'],
+            ['Commitments',o.commitments?.open||0,'spark'],
+            ['Contacts',o.contacts?.count||0,'users'],
+            ['Journal events today',o.journal?.today||0,'book'],
+            ['Vector index',o.vectors?.count||0,'radar'],
+          ].map(([k,v,ic])=>`
+            <div class="flex items-center justify-between py-2 border-b border-white/5 last:border-b-0">
+              <div class="flex items-center gap-2.5">
+                <div class="w-6 h-6 rounded grid place-items-center text-cyan1" style="background:rgba(0,229,255,.06);border:1px solid rgba(0,229,255,.18)">${svg(I[ic],'w-3 h-3')}</div>
+                <span class="text-[13px]">${k}</span>
+              </div>
+              <span class="mono text-[12.5px] font-bold text-ink">${v}</span>
+            </div>
+          `).join('')}
+        </div>
+      </div>
+      <div class="glass rounded-2xl p-6">
+        <div class="flex items-center justify-between mb-4">
+          <div class="eyebrow">Uploads</div>
+          <span class="text-[10.5px] text-inkdim mono break-all">${esc((s.uploads_dir||'—').split('/').slice(-2).join('/'))}</span>
+        </div>
+        <div id="file-list" class="space-y-1 text-[13px]">Loading…</div>
+      </div>
+    </div>
+  `;
+  const files = await _getJSON('/api/files') || {files:[]};
+  const fl = document.getElementById('file-list');
+  fl.innerHTML = files.files?.length ? files.files.slice(0,20).map(f=>`
+    <div class="flex justify-between items-center py-2 border-b border-white/5 last:border-b-0">
+      <a class="truncate text-cyan1 hover:underline flex items-center gap-2" href="/uploads/${encodeURIComponent(f.name)}?token=${encodeURIComponent(_authToken)}" download>
+        ${svg(I.attach,'w-3.5 h-3.5 shrink-0')}
+        <span class="truncate">${esc(f.name)}</span>
+      </a>
+      <span class="text-inkdim text-[11px] mono shrink-0 ml-2">${fmtSize(f.size)}</span>
+    </div>`).join('') : '<div class="text-inkdim">No files.</div>';
+};
+
+/* ───────── Settings ───────── */
+Views.settings = async (host, my) => {
+  const s = await _getJSON('/api/data/status') || {};
+  if(!fresh(my)) return;
+  host.innerHTML = `
+    ${pageHeader('Settings & Security','Pair/revoke devices and manage the local session.')}
+
+    <div class="grid lg:grid-cols-2 gap-5">
+      <div class="glass rounded-2xl p-6">
+        <div class="eyebrow mb-4">Session</div>
+        <dl class="text-[13px] space-y-3">
+          <div class="flex justify-between items-center pb-2 border-b border-white/5"><dt class="text-inkdim">URL</dt><dd class="mono text-[12px]">${esc((s.ip||'—')+':'+(s.port||'—'))}</dd></div>
+          <div class="flex justify-between items-center pb-2 border-b border-white/5"><dt class="text-inkdim">Encryption</dt><dd>${_encReady?'<span class="chip mint"><span class="dot mint"></span>AES-256-CBC</span>':'<span class="chip crimson">Disabled</span>'}</dd></div>
+          <div class="flex justify-between items-center pb-2 border-b border-white/5"><dt class="text-inkdim">TLS</dt><dd>${s.ssl?'<span class="chip mint"><span class="dot mint"></span>Enabled</span>':'<span class="chip amber">Off · LAN plain HTTP</span>'}</dd></div>
+          <div class="flex justify-between items-center"><dt class="text-inkdim">Paired devices</dt><dd class="font-bold">${s.devices||0}</dd></div>
+        </dl>
+        <div class="mt-5 flex gap-2 flex-wrap">
+          <button class="btn-ghost rounded-xl px-4 py-2 text-[11.5px] font-bold tracking-[.14em]" onclick="revokeDevices()">Revoke devices</button>
+          <button class="btn-ghost rounded-xl px-4 py-2 text-[11.5px] font-bold tracking-[.14em]" onclick="logout()">Log out</button>
+        </div>
+      </div>
+      <div class="glass rounded-2xl p-6">
+        <div class="eyebrow mb-4">About</div>
+        <p class="text-[13px] text-inkmed leading-relaxed">
+          JARVIS Command Center · Project Alfa. Local-first personal AI running on this machine. The dashboard is a remote control: audio streams in via WebSocket, commands run on-device, and your memory stays in the <span class="mono text-cyan1">memory/</span> directory.
+        </p>
+        <div class="mt-5 grid grid-cols-2 gap-2 text-[11.5px]">
+          <div class="rounded-lg px-3 py-2 border border-white/5 bg-white/[.015]">
+            <div class="text-inkdim text-[10px] uppercase tracking-wider font-bold">Version</div>
+            <div class="mono text-ink mt-0.5">v7 · P6</div>
+          </div>
+          <div class="rounded-lg px-3 py-2 border border-white/5 bg-white/[.015]">
+            <div class="text-inkdim text-[10px] uppercase tracking-wider font-bold">Build</div>
+            <div class="mono text-ink mt-0.5">2026-11-04</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+};
+async function revokeDevices(){
+  if(!confirm('Revoke every paired device? You will need to re-scan QR on your phone.')) return;
+  const r = await _authFetch('/api/revoke-devices',{method:'POST'});
+  if(r.ok){ toast('Devices revoked'); }
+  else    { toast('Failed','err'); }
+}
+function logout(){
+  sessionStorage.removeItem('jarvis_token');
+  sessionStorage.removeItem('jarvis_key');
+  location.replace('/login');
+}
+
+/* ───────────────────── Voice (shared) ───────────────────── */
+let _voiceWs=null, _audioCtx=null, _micStm=null, _audioNd=null;
+
+function _f32toPcm16(f32, srcRate){
+  let s = f32;
+  if(srcRate !== 16000){
+    const ratio = srcRate/16000;
+    const len = Math.round(f32.length/ratio);
+    s = new Float32Array(len);
+    for(let i=0;i<len;i++) s[i] = f32[Math.min(Math.round(i*ratio), f32.length-1)];
+  }
+  const out = new Int16Array(s.length);
+  for(let i=0;i<s.length;i++) out[i] = Math.max(-32768, Math.min(32767, Math.round(s[i]*32768)));
+  return out.buffer;
+}
+
+function wireMic(btn, opts){
+  if(!btn) return;
+  const big = opts && opts.big;
+  const setIdle = () => {
+    btn.classList.remove('recording');
+    btn.title = 'Voice — tap to speak';
+  };
+  setIdle();
+  btn.onclick = async () => {
+    if(_voiceWs){ stopVoice(); setIdle(); return; }
+    if(!navigator.mediaDevices?.getUserMedia){
+      toast('Microphone API unavailable','err');
+      return;
+    }
+    let stream;
+    try{
+      stream = await navigator.mediaDevices.getUserMedia({audio:{channelCount:1,echoCancellation:true,noiseSuppression:true}});
+    }catch(e){
+      toast(e.name==='NotAllowedError'?'Microphone denied':'Mic error','err');
+      return;
+    }
+    let ctx;
+    try{ ctx = new AudioContext({sampleRate:16000}); } catch(_){ ctx = new AudioContext(); }
+    if(ctx.state==='suspended') await ctx.resume();
+
+    const wsP = location.protocol==='https:'?'wss':'ws';
+    const w = new WebSocket(`${wsP}://${location.host}/ws/phone-audio?token=${encodeURIComponent(_authToken)}`);
+    w.binaryType = 'arraybuffer';
+    w.onopen = async () => {
+      const rate = ctx.sampleRate;
+      const src  = ctx.createMediaStreamSource(stream);
+      const code = `class J extends AudioWorkletProcessor{process(i){const c=i[0]?.[0];if(c)this.port.postMessage(c.slice());return true;}}registerProcessor('j',J);`;
+      try{
+        const url = URL.createObjectURL(new Blob([code],{type:'application/javascript'}));
+        await ctx.audioWorklet.addModule(url); URL.revokeObjectURL(url);
+        const nd = new AudioWorkletNode(ctx,'j');
+        let buf=[], len=0;
+        nd.port.onmessage = e => {
+          const chunk = new Int16Array(_f32toPcm16(e.data, rate));
+          buf.push(chunk); len += chunk.length;
+          if(len >= 1024){
+            const out = new Int16Array(len); let off=0;
+            for(const c of buf){ out.set(c, off); off += c.length; }
+            if(w.readyState===1) w.send(out.buffer);
+            buf = []; len = 0;
+          }
+        };
+        src.connect(nd);
+        _audioNd = nd;
+      }catch(_){
+        const sp = ctx.createScriptProcessor(4096,1,1);
+        sp.onaudioprocess = e => { if(w.readyState===1) w.send(_f32toPcm16(e.inputBuffer.getChannelData(0), rate)); };
+        src.connect(sp); sp.connect(ctx.destination);
+        _audioNd = sp;
+      }
+      btn.classList.add('recording');
+      btn.title = 'Tap to stop';
+      State.voiceOn = true;
+      toast('🎤 Live');
+    };
+    w.onclose = () => stopVoice(setIdle);
+    w.onerror = () => { toast('Voice error','err'); stopVoice(setIdle); };
+    _voiceWs = w; _audioCtx = ctx; _micStm = stream;
+  };
+}
+function stopVoice(cb){
+  try{ _audioNd?.disconnect?.(); }catch{}
+  _audioNd=null;
+  try{ _audioCtx?.close?.(); }catch{}
+  _audioCtx=null;
+  if(_micStm){ _micStm.getTracks().forEach(t=>t.stop()); _micStm=null; }
+  if(_voiceWs){ const x=_voiceWs; _voiceWs=null; if(x.readyState<2) x.close(); }
+  State.voiceOn = false;
+  if(typeof cb === 'function') cb();
+}
+
+/* ───────────────── Palette (⌘K) ───────────────── */
+const paletteEl = document.getElementById('palette');
+const paletteDrop = document.getElementById('palette-drop');
+function renderPalette(q){
+  const all = [...NAV.primary, ...NAV.exec, ...NAV.system];
+  q = (q||'').trim().toLowerCase();
+  const hits = q ? all.filter(x => x.id.includes(q) || x.label.toLowerCase().includes(q)) : all.slice(0,8);
+  if(!hits.length){
+    paletteDrop.innerHTML = `<div class="palette-item text-inkdim">No nav match · press Enter to send "${esc(q)}" to JARVIS</div>`;
+  } else {
+    paletteDrop.innerHTML = hits.map((h,i)=>`<div class="palette-item${i===0?' sel':''}" data-id="${h.id}">${svg(I[h.icon],'w-4 h-4 text-cyan1')}<span>${esc(h.label)}</span></div>`).join('');
+    paletteDrop.querySelectorAll('.palette-item').forEach(el=>{
+      el.onclick = ()=>{ if(el.dataset.id){ go(el.dataset.id); paletteEl.value=''; paletteEl.blur(); paletteDrop.classList.remove('show'); }};
     });
+  }
+  paletteDrop.classList.add('show');
+}
+paletteEl.addEventListener('focus',()=>renderPalette(paletteEl.value));
+paletteEl.addEventListener('input',()=>renderPalette(paletteEl.value));
+paletteEl.addEventListener('blur',()=>setTimeout(()=>paletteDrop.classList.remove('show'),180));
+document.addEventListener('keydown', e=>{
+  if((e.key==='k' || e.key==='K') && (e.metaKey || e.ctrlKey)){
+    e.preventDefault();
+    paletteEl.focus();
+    paletteEl.select();
+  }
+});
+paletteEl.addEventListener('keydown', e=>{
+  if(e.key==='Enter'){
+    const q = e.currentTarget.value.trim().toLowerCase();
+    const all = [...NAV.primary, ...NAV.exec, ...NAV.system];
+    const hit = all.find(x => x.id.includes(q) || x.label.toLowerCase().includes(q));
+    if(hit){ go(hit.id); e.currentTarget.value=''; e.currentTarget.blur(); }
+    else{ sendCommand(e.currentTarget.value.trim()); e.currentTarget.value=''; toast('Sent to JARVIS'); }
+    paletteDrop.classList.remove('show');
+  }
+  if(e.key==='Escape'){ e.currentTarget.blur(); paletteDrop.classList.remove('show'); }
+});
 
-    // ── Toast ─────────────────────────────────────────────────────────────────
-    let _toastTimer;
-    function toast(msg) {
-      const t = document.getElementById('toast');
-      t.textContent = msg; t.classList.add('show');
-      clearTimeout(_toastTimer);
-      _toastTimer = setTimeout(() => t.classList.remove('show'), 2800);
-    }
+/* ───────────────── Latency probe ───────────────── */
+async function probe(){
+  const t0 = performance.now();
+  const s = await _getJSON('/api/data/status');
+  if(!s) return;
+  State.server = s;
+  const ms = Math.round(performance.now() - t0);
+  State.latency = ms;
+  const el = document.getElementById('status-latency');
+  if(el) el.textContent = ms+'ms';
+  const hl = document.getElementById('hero-latency');
+  if(hl) hl.textContent = 'latency ' + ms + 'ms';
+}
+setInterval(probe, 8000);
 
-    // ── Real-time Voice — PCM16 WebSocket → Gemini Live ──────────────────────
-    const micBtn  = document.getElementById('mic-btn');
-    let _voiceWs  = null;
-    let _audioCtx = null;
-    let _micStm   = null;
-    let _audioNd  = null;
-
-    function _micIdle() {
-      micBtn.innerHTML = '🎤';
-      micBtn.title     = 'Voice — tap to speak';
-      micBtn.classList.remove('recording');
-    }
-
-    // Float32 PCM → resample to 16 kHz + convert to Int16
-    function _f32toPcm16(f32, srcRate) {
-      let s = f32;
-      if (srcRate !== 16000) {
-        const ratio = srcRate / 16000;
-        const len   = Math.round(f32.length / ratio);
-        s = new Float32Array(len);
-        for (let i = 0; i < len; i++)
-          s[i] = f32[Math.min(Math.round(i * ratio), f32.length - 1)];
-      }
-      const out = new Int16Array(s.length);
-      for (let i = 0; i < s.length; i++)
-        out[i] = Math.max(-32768, Math.min(32767, Math.round(s[i] * 32768)));
-      return out.buffer;
-    }
-
-    function _showVoiceSetup() {
-      if (document.getElementById('voice-setup')) return; // show once
-      const origin = location.origin;
-      const card = document.createElement('div');
-      card.id = 'voice-setup';
-      card.style.cssText = [
-        'align-self:stretch', 'background:rgba(99,102,241,0.07)',
-        'border:1px solid rgba(99,102,241,0.22)', 'border-radius:14px',
-        'padding:16px 18px', 'font-size:13px', 'line-height:1.8',
-        'animation:pop 0.18s ease'
-      ].join(';');
-      card.innerHTML =
-        '<div style="font-weight:700;color:#818cf8;letter-spacing:.5px;margin-bottom:10px">🎤 One-time voice setup</div>' +
-        '<ol style="padding-left:18px;color:#8899aa;margin:0;display:flex;flex-direction:column;gap:4px">' +
-        '<li>Open a new tab → go to <span style="background:rgba(255,255,255,0.07);padding:1px 6px;border-radius:4px;font-family:monospace;font-size:12px">chrome://flags</span></li>' +
-        '<li>Search: <strong style="color:#dde3ed">Insecure origins treated as secure</strong></li>' +
-        '<li>Paste this URL into the box:<br><span id="flags-url" style="background:rgba(255,255,255,0.07);padding:2px 8px;border-radius:4px;font-family:monospace;font-size:11px;user-select:all;cursor:pointer">' + esc(origin) + '</span></li>' +
-        '<li>Set to <strong style="color:#22c55e">Enabled</strong> → tap <strong style="color:#dde3ed">Relaunch</strong></li>' +
-        '<li>Return here and tap 🎤</li>' +
-        '</ol>';
-      feed.appendChild(card);
-      feed.scrollTop = feed.scrollHeight;
-      // tap to copy
-      card.querySelector('#flags-url').addEventListener('click', () => {
-        navigator.clipboard?.writeText(origin).then(() => toast('URL copied!')).catch(() => {});
-      });
-    }
-
-    async function doMic() {
-      if (_voiceWs) { _stopVoice(); return; }
-
-      if (!navigator.mediaDevices?.getUserMedia) {
-        _showVoiceSetup();
-        return;
-      }
-      let stream;
-      try {
-        stream = await navigator.mediaDevices.getUserMedia({
-          audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
-        });
-      } catch (e) {
-        sys(e.name === 'NotAllowedError'
-          ? 'Microphone denied — tap the address bar lock and allow microphone.'
-          : 'Mic error: ' + e.message);
-        return;
-      }
-
-      // 16 kHz context (fall back to native rate — _f32toPcm16 resamples)
-      let ctx;
-      try { ctx = new AudioContext({ sampleRate: 16000 }); }
-      catch (_) { ctx = new AudioContext(); }
-      if (ctx.state === 'suspended') await ctx.resume();
-
-      const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
-      const ws = new WebSocket(
-        `${wsProto}://${location.host}/ws/phone-audio?token=${encodeURIComponent(_authToken)}`
-      );
-      ws.binaryType = 'arraybuffer';
-
-      ws.onopen = async () => {
-        const rate = ctx.sampleRate;
-        const src  = ctx.createMediaStreamSource(stream);
-
-        // AudioWorklet (modern) — runs in dedicated audio thread
-        const wCode = `class J extends AudioWorkletProcessor{process(i){const c=i[0]?.[0];if(c)this.port.postMessage(c.slice());return true;}}registerProcessor('j',J);`;
-        try {
-          const burl = URL.createObjectURL(new Blob([wCode], { type: 'application/javascript' }));
-          await ctx.audioWorklet.addModule(burl);
-          URL.revokeObjectURL(burl);
-          const nd = new AudioWorkletNode(ctx, 'j');
-          // Buffer to 1024 samples (64 ms at 16 kHz) before sending —
-          // matches PC mic chunk size, prevents queue flooding on the server.
-          let _pbuf = [], _plen = 0;
-          nd.port.onmessage = e => {
-            const chunk = new Int16Array(_f32toPcm16(e.data, rate));
-            _pbuf.push(chunk); _plen += chunk.length;
-            if (_plen >= 1024) {
-              const out = new Int16Array(_plen); let off = 0;
-              for (const c of _pbuf) { out.set(c, off); off += c.length; }
-              if (ws.readyState === 1) ws.send(out.buffer);
-              _pbuf = []; _plen = 0;
-            }
-          };
-          src.connect(nd);
-          _audioNd = nd;
-        } catch (_) {
-          // ScriptProcessor fallback (deprecated, still works everywhere)
-          const sp = ctx.createScriptProcessor(4096, 1, 1);
-          sp.onaudioprocess = e => {
-            if (ws.readyState === 1) ws.send(_f32toPcm16(e.inputBuffer.getChannelData(0), rate));
-          };
-          src.connect(sp); sp.connect(ctx.destination);
-          _audioNd = sp;
-        }
-
-        micBtn.innerHTML = '⏹';
-        micBtn.title     = 'Tap to stop';
-        micBtn.classList.add('recording');
-        sys('Voice live — speak now');
-        toast('🎤 Live');
-      };
-
-      ws.onclose = () => { _stopVoice(); };
-      ws.onerror = () => { sys('Voice connection failed.'); _stopVoice(); };
-
-      _voiceWs  = ws;
-      _audioCtx = ctx;
-      _micStm   = stream;
-    }
-
-    function _stopVoice() {
-      if (_audioNd)  { try { _audioNd.disconnect(); }  catch (_) {}; _audioNd  = null; }
-      if (_audioCtx) { try { _audioCtx.close(); }      catch (_) {}; _audioCtx = null; }
-      if (_micStm)   { _micStm.getTracks().forEach(t => t.stop()); _micStm = null; }
-      if (_voiceWs)  {
-        const w = _voiceWs; _voiceWs = null;
-        if (w.readyState < 2) w.close();
-      }
-      _micIdle();
-    }
-  </script>
+/* ───────────────── Boot ───────────────── */
+renderNav();
+const initial = (location.hash || '#overview').replace('#','');
+go(initial);
+probe();
+</script>
 </body>
 </html>

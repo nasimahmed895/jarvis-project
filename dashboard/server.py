@@ -698,6 +698,311 @@ class DashboardServer:
                 self._wake_callback()
             return JSONResponse({"ok": True})
 
+        # ── Read-only data API (command-center dashboard) ────────────────────
+        # All endpoints are auth-gated and import JARVIS modules lazily so
+        # dashboard still serves even if a given backend module fails to load.
+
+        _MEM_DIR = BASE_DIR / "memory"
+
+        @app.get("/api/data/status")
+        async def data_status(req: Request):
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            return JSONResponse({
+                "ok": True,
+                "server_time": time.time(),
+                "ip": self._ip,
+                "port": PORT,
+                "clients": len(self._clients),
+                "history": len(self._history),
+                "queued_commands": self._command_queue.qsize(),
+                "devices": len(self._device_sessions),
+                "uploads_dir": str(self._uploads_dir),
+                "ssl": self._ssl_enabled(),
+            })
+
+        @app.get("/api/data/history")
+        async def data_history(req: Request, limit: int = 100):
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            n = max(1, min(int(limit), 300))
+            return JSONResponse({"ok": True, "items": self._history[-n:]})
+
+        @app.get("/api/data/overview")
+        async def data_overview(req: Request):
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            out = {
+                "ok": True,
+                "generated_at": time.time(),
+                "memory":      {"total": 0, "categories": {}},
+                "tasks":       {"count": 0, "by_status": {}},
+                "todos":       {"open": 0, "done": 0},
+                "projects":    {"count": 0, "active": 0},
+                "commitments": {"open": 0, "due_24h": 0},
+                "journal":     {"today": 0},
+                "vectors":     {"count": 0},
+                "contacts":    {"count": 0, "follow_ups": 0},
+                "trips":       {"upcoming": 0},
+            }
+            try:
+                from memory import memory_manager
+                mem = memory_manager.load_memory() or {}
+                cats = {}
+                total = 0
+                for k, v in mem.items():
+                    if isinstance(v, dict):
+                        cats[k] = len(v);     total += len(v)
+                    elif isinstance(v, list):
+                        cats[k] = len(v);     total += len(v)
+                    elif v is not None:
+                        cats[k] = 1;          total += 1
+                out["memory"] = {"total": total, "categories": cats}
+            except Exception:
+                pass
+            try:
+                from core import tasks as _t
+                _t.connect(_MEM_DIR / "tasks.sqlite")
+                rows = _t.list_tasks(limit=500)
+                by = {}
+                for r in rows:
+                    s = r.get("status", "unknown")
+                    by[s] = by.get(s, 0) + 1
+                out["tasks"] = {"count": len(rows), "by_status": by}
+            except Exception:
+                pass
+            try:
+                import sqlite3
+                p = _MEM_DIR / "todos.sqlite"
+                if p.exists():
+                    cn = sqlite3.connect(str(p))
+                    for d, n in cn.execute("SELECT done, COUNT(*) FROM todos GROUP BY done"):
+                        out["todos"]["done" if d else "open"] = n
+                    cn.close()
+            except Exception:
+                pass
+            try:
+                from core import projects as _p
+                _p.connect(_MEM_DIR / "projects.sqlite")
+                rows = _p.list_projects(limit=500)
+                out["projects"] = {
+                    "count": len(rows),
+                    "active": sum(1 for r in rows if r.get("status") == "active"),
+                }
+            except Exception:
+                pass
+            try:
+                from core import commitments as _c
+                _c.connect(_MEM_DIR / "commitments.sqlite")
+                out["commitments"] = {
+                    "open": len(_c.list_open(limit=500)),
+                    "due_24h": len(_c.due_within(24)),
+                }
+            except Exception:
+                pass
+            try:
+                from core import journal as _j
+                _j.connect(_MEM_DIR / "journal")
+                out["journal"]["today"] = len(_j.read_recent(limit=500))
+            except Exception:
+                pass
+            try:
+                from core import vectors as _v
+                _v.connect(_MEM_DIR / "vectors.sqlite")
+                out["vectors"]["count"] = _v.count()
+            except Exception:
+                pass
+            try:
+                from core import crm as _cr
+                _cr.connect(_MEM_DIR / "crm.sqlite")
+                out["contacts"] = {
+                    "count": len(_cr.list_contacts(limit=500)),
+                    "follow_ups": len(_cr.due_follow_ups(within_hours=72)),
+                }
+            except Exception:
+                pass
+            try:
+                from core import travel as _tr
+                _tr.connect(_MEM_DIR / "travel.sqlite")
+                out["trips"]["upcoming"] = len(_tr.upcoming_trips(within_days=90))
+            except Exception:
+                pass
+            return JSONResponse(out)
+
+        @app.get("/api/data/tasks")
+        async def data_tasks(req: Request, limit: int = 100):
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            try:
+                from core import tasks as _t
+                _t.connect(_MEM_DIR / "tasks.sqlite")
+                n = max(1, min(int(limit), 500))
+                return JSONResponse({"ok": True, "items": _t.list_tasks(limit=n)})
+            except Exception as e:
+                return JSONResponse({"ok": True, "items": [], "error": str(e)})
+
+        @app.get("/api/data/todos")
+        async def data_todos(req: Request, limit: int = 200):
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            try:
+                import sqlite3
+                p = _MEM_DIR / "todos.sqlite"
+                if not p.exists():
+                    return JSONResponse({"ok": True, "items": []})
+                cn = sqlite3.connect(str(p))
+                cn.row_factory = sqlite3.Row
+                n = max(1, min(int(limit), 1000))
+                rows = cn.execute(
+                    "SELECT id, list, text, done, due, priority, created_at, done_at "
+                    "FROM todos ORDER BY done ASC, priority DESC, created_at DESC LIMIT ?",
+                    (n,),
+                ).fetchall()
+                cn.close()
+                return JSONResponse({"ok": True, "items": [dict(r) for r in rows]})
+            except Exception as e:
+                return JSONResponse({"ok": True, "items": [], "error": str(e)})
+
+        @app.get("/api/data/projects")
+        async def data_projects(req: Request):
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            out = []
+            try:
+                from core import projects as _p
+                _p.connect(_MEM_DIR / "projects.sqlite")
+                for row in _p.list_projects(limit=200):
+                    try:
+                        summ = _p.project_summary(row["id"])
+                    except Exception:
+                        summ = {}
+                    out.append({"project": row, "summary": summ})
+            except Exception:
+                pass
+            return JSONResponse({"ok": True, "items": out})
+
+        @app.get("/api/data/commitments")
+        async def data_commitments(req: Request):
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            out = {"open": [], "due_24h": []}
+            try:
+                from core import commitments as _c
+                _c.connect(_MEM_DIR / "commitments.sqlite")
+                out["open"] = _c.list_open(limit=200)
+                out["due_24h"] = _c.due_within(24)
+            except Exception:
+                pass
+            return JSONResponse({"ok": True, **out})
+
+        @app.get("/api/data/memory")
+        async def data_memory(req: Request):
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            try:
+                from memory import memory_manager as _m
+                items = _m.all_entries_for_ui()
+                return JSONResponse({"ok": True, "items": items})
+            except Exception as e:
+                return JSONResponse({"ok": True, "items": [], "error": str(e)})
+
+        @app.get("/api/data/journal")
+        async def data_journal(req: Request, limit: int = 100):
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            try:
+                from core import journal as _j
+                _j.connect(_MEM_DIR / "journal")
+                n = max(1, min(int(limit), 500))
+                return JSONResponse({"ok": True, "items": _j.read_recent(limit=n)})
+            except Exception as e:
+                return JSONResponse({"ok": True, "items": [], "error": str(e)})
+
+        @app.get("/api/data/contacts")
+        async def data_contacts(req: Request):
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            out = {"contacts": [], "follow_ups": [], "stats": {}}
+            try:
+                from core import crm as _cr
+                _cr.connect(_MEM_DIR / "crm.sqlite")
+                out["contacts"] = _cr.list_contacts(limit=200)
+                out["follow_ups"] = _cr.due_follow_ups(within_hours=72)
+                out["stats"] = _cr.stats()
+            except Exception:
+                pass
+            return JSONResponse({"ok": True, **out})
+
+        @app.get("/api/data/finance")
+        async def data_finance(req: Request):
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            import datetime as _dt
+            now = _dt.datetime.now()
+            out = {"expenses": [], "monthly": {}, "budgets": [],
+                   "bills": [], "subs": [], "sub_monthly": {}}
+            try:
+                from core import finance as _f
+                _f.connect(_MEM_DIR / "finance.sqlite")
+                out["expenses"]    = _f.list_expenses(limit=50)
+                out["monthly"]     = _f.monthly_summary(now.year, now.month)
+                out["budgets"]     = _f.budget_status(now.year, now.month)
+                out["bills"]       = _f.upcoming_bills(within_days=14)
+                out["subs"]        = _f.active_subscriptions()
+                out["sub_monthly"] = _f.monthly_subscription_cost()
+            except Exception:
+                pass
+            return JSONResponse({"ok": True, **out})
+
+        @app.get("/api/data/trips")
+        async def data_trips(req: Request):
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            out = {"all": [], "upcoming": []}
+            try:
+                from core import travel as _tr
+                _tr.connect(_MEM_DIR / "travel.sqlite")
+                out["all"]      = _tr.list_trips(limit=50)
+                out["upcoming"] = _tr.upcoming_trips(within_days=90)
+            except Exception:
+                pass
+            return JSONResponse({"ok": True, **out})
+
+        @app.get("/api/data/vectors")
+        async def data_vectors(req: Request, q: str = "", limit: int = 10):
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            out = {"count": 0, "results": []}
+            try:
+                from core import vectors as _v
+                _v.connect(_MEM_DIR / "vectors.sqlite")
+                out["count"] = _v.count()
+                q = (q or "").strip()
+                if q:
+                    out["results"] = _v.search(q, top_k=max(1, min(int(limit), 20)))
+            except Exception:
+                pass
+            return JSONResponse({"ok": True, **out})
+
+        @app.get("/api/data/modules")
+        async def data_modules(req: Request):
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            def _enum(path):
+                try:
+                    return sorted(
+                        p.stem for p in path.glob("*.py")
+                        if not p.stem.startswith("_") and p.stem != "__init__"
+                    )
+                except Exception:
+                    return []
+            return JSONResponse({
+                "ok": True,
+                "actions": _enum(BASE_DIR / "actions"),
+                "plugins": _enum(BASE_DIR / "plugins"),
+                "core":    _enum(BASE_DIR / "core"),
+            })
+
         # ── Phone mic real-time audio → Gemini Live ──────────────────────────
 
         @app.websocket("/ws/phone-audio")
