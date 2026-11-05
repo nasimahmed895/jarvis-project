@@ -21,7 +21,8 @@ THE DESIGN HERE
       2. This module hands the UI a banner with CONFIRM / CANCEL and returns
          IMMEDIATELY with a sentence for the model to say out loud.
       3. If — and only if — the user presses CONFIRM, the UI calls `resolve()`,
-         which runs the stored callable off the Qt thread.
+         which tells the active conversation what the user chose and runs the
+         stored callable off the Qt thread.
 
     Nothing blocks. The model keeps talking while the banner is up, so this
     costs no latency at all; in fact it is cheaper than the old gate, which
@@ -63,12 +64,13 @@ _lock = threading.Lock()
 _show_cb: Optional[Callable[[str, str], None]] = None
 _hide_cb: Optional[Callable[[], None]] = None
 _log_cb:  Optional[Callable[[str], None]] = None
+_resolved_cb: Optional[Callable[[str, bool], None]] = None
 
 
-def bind(show, hide, log=None) -> None:
+def bind(show, hide, log=None, resolved=None) -> None:
     """Wire this module to the HUD. Called once from main.py at startup."""
-    global _show_cb, _hide_cb, _log_cb
-    _show_cb, _hide_cb, _log_cb = show, hide, log
+    global _show_cb, _hide_cb, _log_cb, _resolved_cb
+    _show_cb, _hide_cb, _log_cb, _resolved_cb = show, hide, log, resolved
 
 
 def _log(msg: str) -> None:
@@ -135,6 +137,12 @@ def resolve(accepted: bool) -> None:
     if time.monotonic() - p.at > TIMEOUT_SECONDS:
         _log(f"SYS: Confirmation expired — {p.title}")
         return
+
+    if _resolved_cb:
+        try:
+            _resolved_cb(p.title, accepted)
+        except Exception as e:
+            _log(f"ERR: Could not notify JARVIS about confirmation — {e}")
 
     if not accepted:
         _log(f"SYS: Cancelled — {p.title}")

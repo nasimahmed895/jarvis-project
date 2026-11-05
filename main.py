@@ -117,6 +117,7 @@ CHANNELS            = 1
 SEND_SAMPLE_RATE    = 16000 
 RECEIVE_SAMPLE_RATE = 24000
 CHUNK_SIZE          = 1024
+LIVE_KEEPALIVE_SECONDS = 5.0
 
 # RMS below which 16-bit PCM is treated as room silence; above _LEVEL_FULL it
 # reads as a full-height waveform. Tuned so ordinary speech lands mid-range and
@@ -993,6 +994,18 @@ class JarvisLive:
         except Exception as e:
             print(f"[PluginSay] {e}")
 
+    def _on_confirmation_resolved(self, title: str, accepted: bool) -> None:
+        decision = "confirmed" if accepted else "cancelled"
+        self.plugin_say(
+            f"The user {decision} the on-screen request: {title}. "
+            + (
+                "The gated action is now being carried out. Acknowledge the "
+                "confirmation briefly; do not ask the user to confirm it again."
+                if accepted else
+                "Do not carry out the action; briefly acknowledge the cancellation."
+            )
+        )
+
     def request_reconnect(self, keep_context: bool = True, reason: str = ""):
         """Thread-safe: ask the run loop to tear down and rebuild the Live
         session. Called from the Qt thread. No-op until the async loop and
@@ -1724,7 +1737,19 @@ class JarvisLive:
 
     async def _send_realtime(self):
         while True:
-            msg = await self.out_queue.get()
+            try:
+                msg = await asyncio.wait_for(
+                    self.out_queue.get(), timeout=LIVE_KEEPALIVE_SECONDS
+                )
+            except asyncio.TimeoutError:
+                # The Live server closes sessions that receive no client
+                # messages. Send synthetic silence when the mic queue is idle;
+                # this contains no captured audio and keeps the session alive
+                # through intentional mic gates such as mute or push-to-talk.
+                msg = {
+                    "data": bytes(CHUNK_SIZE * 2),
+                    "mime_type": "audio/pcm",
+                }
             # Gemini 3.x Live rejects the old realtime_input.media_chunks field
             # (what `media=...` maps to) and closes the socket with a 1007. Send
             # mic / phone PCM through the new `audio` field instead. Queue items
@@ -2778,6 +2803,7 @@ class JarvisLive:
             show = self.ui.show_confirm,
             hide = self.ui.hide_confirm,
             log  = self.ui.write_log,
+            resolved = self._on_confirmation_resolved,
         )
         set_trim_notifier(self.ui.write_log)
 
@@ -3045,8 +3071,15 @@ class JarvisLive:
                 # above drops it and the next attempt starts clean.
                 if "1008" in err_str or "operation was aborted" in err_str.lower():
                     self._conn_backoff = 0
-                    self.ui.write_log("SYS: Session expired — resuming.")
-                    print("[JARVIS] 1008 session expiry — attempting resume.")
+                    if "inactiv" in err_str.lower():
+                        self.ui.write_log(
+                            "SYS: Live session closed after inactivity — reconnecting."
+                        )
+                        print("[JARVIS] 1008 inactivity — attempting resume.")
+                        await asyncio.sleep(3)
+                    else:
+                        self.ui.write_log("SYS: Session expired — resuming.")
+                        print("[JARVIS] 1008 session expiry — attempting resume.")
                     continue
 
                 # Invalid API key — stop hammering the API, prompt re-configuration

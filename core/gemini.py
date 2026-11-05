@@ -233,7 +233,8 @@ def _cool(model: str, seconds: float = _COOLDOWN_SECONDS) -> None:
 
 
 def is_quota_error(err: str) -> bool:
-    return "429" in err or "RESOURCE_EXHAUSTED" in err
+    low = err.lower()
+    return ("429" in err or "resource_exhausted" in low or "quota" in low)
 
 
 def is_unavailable_error(err: str) -> bool:
