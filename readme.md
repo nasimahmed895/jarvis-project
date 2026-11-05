@@ -242,7 +242,9 @@ Your choice is stored **by name, not by index** — indices shift whenever somet
 
 The handle is captured and replayed now. A network blip, or switching your microphone, keeps the conversation intact.
 
-It is held in memory only, deliberately: writing it to disk would make a fresh launch continue yesterday's chat, which sounds appealing but breaks the session-summary flow — a conversation that never ends never produces a summary, and the "yesterday we talked about…" line in the morning briefing silently disappears. Changing the **voice** also starts clean on purpose, since resuming restores the server's session state and would likely bring the old voice back with it.
+The Live API still ends individual connections periodically and announces this with `GoAway`; that server-enforced rotation cannot be disabled. JARVIS reconnects automatically with the latest handle. If the server stalls while restoring it, setup is capped at 15 seconds and JARVIS retries with a fresh connection instead of waiting indefinitely.
+
+The handle is persisted with a 12-hour TTL so a restart can resume a recent conversation without replaying a stale session indefinitely. Changing the **voice** also starts clean on purpose, since resuming restores the server's session state and would likely bring the old voice back with it.
 
 ### 🩹 Fixes that came with it
 

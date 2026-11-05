@@ -35,6 +35,7 @@ for _stream in ("stdout", "stderr"):
 # ─────────────────────────────────────────────────────────────────────────────
 
 import asyncio
+from contextlib import AsyncExitStack, asynccontextmanager
 import re
 import threading
 import time
@@ -118,6 +119,7 @@ SEND_SAMPLE_RATE    = 16000
 RECEIVE_SAMPLE_RATE = 24000
 CHUNK_SIZE          = 1024
 LIVE_KEEPALIVE_SECONDS = 5.0
+LIVE_CONNECT_TIMEOUT_SECONDS = 15.0
 
 # RMS below which 16-bit PCM is treated as room silence; above _LEVEL_FULL it
 # reads as a full-height waveform. Tuned so ordinary speech lands mid-range and
@@ -139,6 +141,17 @@ def _pcm_level(samples) -> float:
     if rms <= _LEVEL_FLOOR:
         return 0.0
     return min(1.0, (rms - _LEVEL_FLOOR) / (_LEVEL_FULL - _LEVEL_FLOOR))
+
+
+@asynccontextmanager
+async def _connect_live_with_timeout(client, model, config):
+    """Bound Live setup; the SDK otherwise waits indefinitely for setup_complete."""
+    async with AsyncExitStack() as stack:
+        async with asyncio.timeout(LIVE_CONNECT_TIMEOUT_SECONDS):
+            session = await stack.enter_async_context(
+                client.aio.live.connect(model=model, config=config)
+            )
+        yield session
 
 
 # ── Viseme extraction ─────────────────────────────────────────────────────────
@@ -2852,7 +2865,9 @@ class JarvisLive:
                 )
 
                 async with (
-                    client.aio.live.connect(model=live_model, config=config) as session,
+                    _connect_live_with_timeout(
+                        client, model=live_model, config=config
+                    ) as session,
                     asyncio.TaskGroup() as tg,
                 ):
                     self.session          = session
@@ -2994,6 +3009,19 @@ class JarvisLive:
                     self._conn_backoff = 0
                     continue
 
+                if isinstance(e, TimeoutError) and _resumed_with:
+                    print(
+                        "[JARVIS] Session resumption timed out — "
+                        "retrying with a fresh session."
+                    )
+                    self.ui.write_log(
+                        "SYS: Session resume timed out — starting a fresh connection."
+                    )
+                    self._resume_handle = None
+                    agent_session.clear_handle()
+                    self._conn_backoff = 0
+                    continue
+
                 # A resumption handle the server will not accept — expired, or
                 # belonging to a session it has since dropped. Without this, the
                 # same dead handle would be replayed on every retry and the
@@ -3014,6 +3042,10 @@ class JarvisLive:
                     continue
 
                 err_str = str(e)
+                if isinstance(e, TimeoutError):
+                    self.ui.write_log(
+                        "NET: Live connection setup timed out — retrying."
+                    )
                 print(f"[JARVIS] Error ({type(e).__name__}): {e}")
                 traceback.print_exc()
 
