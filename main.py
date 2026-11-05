@@ -745,6 +745,8 @@ class JarvisLive:
             notify=lambda msg: self.ui.write_log(f"SYS: {msg}"),
         )
         self.ui.get_plugins = self._plugin_registry.list_for_ui
+        self.ui.get_core_tools = lambda: TOOL_DECLARATIONS
+        self.ui.get_actions = self._action_registry.get_tool_declarations
         self.ui.get_plugin_settings = self._plugin_registry.settings_schemas  # ⚙ settings tab
         self.ui.request_say = self.plugin_say   # plugins: mid-task speech channel
 
@@ -765,6 +767,7 @@ class JarvisLive:
             logger=lambda m: print(m),
             notify=lambda m: self.ui.write_log(m),
         )
+        self.ui.get_mcp_tools = self._mcp.get_tool_declarations
         threading.Thread(
             target=self._mcp.load_from_config,
             args=(BASE_DIR / "config" / "mcp_servers.json",),
