@@ -58,6 +58,22 @@ class KillswitchUnitTests(unittest.TestCase):
         self.assertFalse(killswitch.is_active())
         self.assertFalse(self._flag_path.exists())
 
+    def test_flag_check_is_cached(self):
+        """Hot-path callers probe is_active() many times per second; the
+        flag-file stat must be memoised so we don't burn syscalls."""
+        import unittest.mock
+        # No flag file present → first call stats disk, result cached.
+        self.assertFalse(killswitch.is_active())
+        # Patch Path.exists on the module-level _FLAG_PATH; counts calls.
+        with unittest.mock.patch.object(
+            type(killswitch._FLAG_PATH), "exists",
+            side_effect=lambda: False,
+        ) as m:
+            for _ in range(50):
+                killswitch.is_active()
+            # Under TTL (1s) only zero or one syscall allowed.
+            self.assertLessEqual(m.call_count, 1)
+
     def test_listener_exception_is_contained(self):
         def boom(_r): raise RuntimeError("bad listener")
         killswitch.on_trigger(boom)

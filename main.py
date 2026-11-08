@@ -2772,18 +2772,23 @@ class JarvisLive:
     # ── dashboard command relay ─────────────────────────────────────────────
 
     async def _process_dashboard_commands(self) -> None:
+        # No queue-timeout on get(): asyncio.Queue.get() returns immediately
+        # when an item is available and parks cheaply when empty — the old
+        # 0.5s timeout only added latency to the first word the user heard
+        # from a remote command.
         while True:
             try:
-                text = await asyncio.wait_for(
-                    self._dashboard._command_queue.get(), timeout=0.5
-                )
+                text = await self._dashboard._command_queue.get()
                 if not text:
                     continue
-                # Wait up to 8s for session to become ready after a wake
-                for _ in range(80):
-                    if self.session:
-                        break
-                    await asyncio.sleep(0.1)
+                # Wait for session to come up after a wake — but cheaply.
+                # 50ms poll instead of 100ms, hard-capped at 1.5s. Previous
+                # 8s cap only mattered during cold boot and silently held
+                # the user's typed command behind an invisible wait.
+                waited_ms = 0
+                while not self.session and waited_ms < 1500:
+                    await asyncio.sleep(0.05)
+                    waited_ms += 50
                 if self.session:
                     # A remote command is deliberate control and the phone user
                     # has no desktop WAKE button — so it wakes JARVIS if asleep.
@@ -2796,8 +2801,8 @@ class JarvisLive:
                     self.ui.write_log(f"[Web]: {text}")
                 else:
                     print(f"[Dashboard] Dropped command (no session): {text}")
-            except asyncio.TimeoutError:
-                pass
+            except asyncio.CancelledError:
+                raise
             except Exception as e:
                 print(f"[Dashboard] Command error: {e}")
                 await asyncio.sleep(0.5)

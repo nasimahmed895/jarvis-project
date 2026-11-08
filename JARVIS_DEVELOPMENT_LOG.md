@@ -32,6 +32,12 @@ Append-only. One entry per implementation chunk. Format:
 - Matrix updates: 20.8 MISSING → IMPLEMENTED.
 - Notes: migration is additive (`ALTER TABLE ADD COLUMN`); unspecified `timeout_s` preserves pre-change behavior exactly.
 
+## 2026-11-08 — Latency fixes (voice + text input hot path)
+- What: four targeted fixes after the user reported 3–5s response latency. (1) Turn tuning default flipped to `enabled=True` with silence_ms=550 → cuts 500–1000ms off visible voice-to-first-word latency. (2) Killswitch flag-file stat memoised with a 1s TTL — hot loops (worker tick, receive loop) now hit one syscall/sec instead of 20+/sec. (3) Dashboard command relay removed its 0.5s queue-get timeout and lowered the session-ready poll from 8s@100ms → 1.5s@50ms. (4) Verified `_notify_subscribers()` already fires outside `_DB_LOCK` (no change needed).
+- Files: `memory/config_manager.py`, `core/killswitch.py`, `main.py`, `tests/test_killswitch.py`.
+- Tests: 679 → 680 (+1 cache guardrail).
+- Notes: a chunk of the perceived 3–5s is Gemini Live inference itself, not fixable in-app. The VAD window + dashboard polling were the two in-app wins. Operators who dislike the tighter VAD can set `"turn_tuning": {"enabled": false}` in `config/api_keys.json`.
+
 ## 2026-11-08 — P4.11 predictive task suggestions
 - What: new `core/predictor.py` — scans journal for `task_done` / `step_start`, groups by goal, proposes daily or weekly cron slots when support ≥ 3 and time spread ≤ 30min. Pure heuristic, no LLM.
 - Files: `core/predictor.py` (new), `tests/test_predictor.py` (new).

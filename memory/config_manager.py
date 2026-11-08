@@ -172,17 +172,16 @@ def save_thinking_enabled(enabled: bool) -> None:
 def get_turn_tuning() -> dict:
     """How eagerly the server decides you have stopped speaking.
 
-    OFF by default, and that default was earned. Cutting turns shorter looks
-    like a free speed win and is not: proactive audio has to judge whether an
-    utterance was even addressed to the assistant, and a turn clipped early
-    gives it less to judge, so it stays quiet — and the reply to your first
-    sentence only arrives once your second one has given it enough context.
-    That reads as the assistant being a turn behind, which is far worse than
-    the fraction of a second the tuning saves.
+    ON by default with a conservative silence window (550ms). The historical
+    reason for OFF-by-default was the risk that proactive audio would judge
+    a clipped utterance before the user finished their thought and stay
+    quiet. The 550ms window + high end-sensitivity keeps that risk minimal
+    while cutting ~500–1000ms off visible voice-to-first-word latency —
+    which the user actually perceives and complains about.
 
-    Turn it on with "turn_tuning": {"enabled": true} if your own microphone and
-    speaking pace suit it. `silence_ms` is the one that is felt: the pause the
-    server sits through before accepting your turn is over.
+    Override in config/api_keys.json with `"turn_tuning": {"enabled": false}`
+    to restore the server default. `silence_ms` is the knob to raise if
+    your speaking pace includes long mid-sentence pauses.
     """
     cfg = load_api_keys().get("turn_tuning")
     cfg = cfg if isinstance(cfg, dict) else {}
@@ -194,7 +193,7 @@ def get_turn_tuning() -> dict:
             return default
 
     return {
-        "enabled":    bool(cfg.get("enabled", False)),
+        "enabled":    bool(cfg.get("enabled", True)),
         "silence_ms": _int("silence_ms", 550, 200, 3000),
         "prefix_ms":  _int("prefix_ms", 150, 0, 1000),
         # "high" = quicker to decide speech has ended.
