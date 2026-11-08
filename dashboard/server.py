@@ -90,6 +90,35 @@ def _decrypt_cbc(aes_key: bytes, enc_b64: str) -> str:
     return (unpadder.update(padded) + unpadder.finalize()).decode('utf-8')
 
 
+# ── Task progress summariser (P3.3) ───────────────────────────────────────────
+
+def _summarise_task(tasks_mod, row: dict) -> dict:
+    """Shrink a task row + its steps into a progress-friendly payload.
+
+    Produces `{id, goal, status, done, total, pct, updated_at, next_step}`
+    so the dashboard can render a progress bar without pulling per-step
+    detail for every active task."""
+    try:
+        steps = tasks_mod.task_steps(row["id"])
+    except Exception:
+        steps = []
+    done = sum(1 for s in steps if s["status"] == "done")
+    total = len(steps)
+    running = next((s for s in steps if s["status"] == "running"), None)
+    next_planned = next((s for s in steps if s["status"] in ("planned", "ready")), None)
+    next_step = running or next_planned
+    return {
+        "id":         row["id"],
+        "goal":       row.get("goal") or "",
+        "status":     row["status"],
+        "done":       done,
+        "total":      total,
+        "pct":        round(100.0 * done / total, 1) if total else 0.0,
+        "updated_at": row.get("updated_at"),
+        "next_step":  (next_step.get("verb") if next_step else None),
+    }
+
+
 # ── Per-IP token-bucket rate limiter ──────────────────────────────────────────
 #
 # In-process, dependency-free. Guards /api/* and /login against brute-force and
@@ -622,6 +651,33 @@ class DashboardServer:
                     )
             return await call_next(request)
 
+        @app.post("/webhook/{name}")
+        async def inbound_webhook(name: str, request: "Request"):
+            """P4.9 — HMAC-signed inbound webhooks. Register via
+            core.webhooks.default_registry().register()."""
+            from core.webhooks import default_registry
+            reg = default_registry()
+            body = await request.body()
+            sig = request.headers.get("X-JARVIS-Signature")
+            if not reg.verify(name, body, sig):
+                return JSONResponse(
+                    {"error": "Unauthorized"}, status_code=401,
+                )
+            try:
+                headers = dict(request.headers)
+                result = reg.dispatch(name, body, headers)
+            except KeyError:
+                return JSONResponse(
+                    {"error": "Unknown webhook"}, status_code=404,
+                )
+            except Exception as e:
+                return JSONResponse(
+                    {"error": f"{type(e).__name__}: {e}"}, status_code=500,
+                )
+            if isinstance(result, dict):
+                return JSONResponse({"ok": True, "result": result})
+            return JSONResponse({"ok": True, "result": str(result) if result is not None else None})
+
         @app.get("/health")
         async def health():
             return JSONResponse({
@@ -933,6 +989,84 @@ class DashboardServer:
                 return JSONResponse({"ok": True, "items": _t.list_tasks(limit=n)})
             except Exception as e:
                 return JSONResponse({"ok": True, "items": [], "error": str(e)})
+
+        @app.get("/api/v1/metrics")
+        async def v1_metrics(req: Request):
+            """P3.4 — CPU / RAM / disk snapshot for the health panel."""
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            metrics: dict = {
+                "uptime_s": round(time.time() - self._started_at, 1),
+            }
+            try:
+                import psutil
+                metrics["cpu_percent"] = round(psutil.cpu_percent(interval=None), 1)
+                vm = psutil.virtual_memory()
+                metrics["ram"] = {
+                    "percent":   round(vm.percent, 1),
+                    "used_mb":   round(vm.used / (1024 * 1024)),
+                    "total_mb":  round(vm.total / (1024 * 1024)),
+                }
+                disk = psutil.disk_usage("/")
+                metrics["disk"] = {
+                    "percent":   round(disk.percent, 1),
+                    "used_gb":   round(disk.used / (1024 ** 3), 1),
+                    "total_gb":  round(disk.total / (1024 ** 3), 1),
+                }
+                metrics["process_count"] = len(psutil.pids())
+            except Exception as e:
+                metrics["error"] = f"{type(e).__name__}: {e}"
+            return JSONResponse(metrics)
+
+        # ── v1 task endpoints (P3.3): progress bars + history view ───────
+
+        @app.get("/api/v1/tasks/progress")
+        async def v1_tasks_progress(req: Request, limit: int = 20):
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            try:
+                from core import tasks as _t
+                _t.connect(_MEM_DIR / "tasks.sqlite")
+                n = max(1, min(int(limit), 100))
+                rows = _t.list_tasks(
+                    status=["planned", "running", "awaiting_user"],
+                    limit=n,
+                )
+                items = [_summarise_task(_t, r) for r in rows]
+                return JSONResponse({"ok": True, "items": items})
+            except Exception as e:
+                return JSONResponse({"ok": True, "items": [], "error": str(e)})
+
+        @app.get("/api/v1/tasks/history")
+        async def v1_tasks_history(req: Request, limit: int = 50,
+                                    status: str = "done,failed,cancelled"):
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            try:
+                from core import tasks as _t
+                _t.connect(_MEM_DIR / "tasks.sqlite")
+                n = max(1, min(int(limit), 200))
+                wanted = [s.strip() for s in status.split(",") if s.strip()]
+                rows = _t.list_tasks(status=wanted, limit=n)
+                items = [_summarise_task(_t, r) for r in rows]
+                return JSONResponse({"ok": True, "items": items})
+            except Exception as e:
+                return JSONResponse({"ok": True, "items": [], "error": str(e)})
+
+        @app.get("/api/v1/tasks/{task_id}")
+        async def v1_task_detail(req: Request, task_id: int):
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            try:
+                from core import tasks as _t
+                _t.connect(_MEM_DIR / "tasks.sqlite")
+                t = _t.get_task(int(task_id))
+                if not t:
+                    return JSONResponse({"error": "Not found"}, status_code=404)
+                steps = _t.task_steps(int(task_id))
+                return JSONResponse({"ok": True, "task": t, "steps": steps})
+            except Exception as e:
+                return JSONResponse({"error": str(e)}, status_code=500)
 
         @app.get("/api/data/todos")
         async def data_todos(req: Request, limit: int = 200):

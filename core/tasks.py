@@ -32,6 +32,40 @@ _DB_LOCK = threading.RLock()
 _DB: sqlite3.Connection | None = None
 _DB_PATH: Path | None = None
 
+# ── Change subscribers (P1.5 event-driven worker wake) ──────────────────────
+#
+# The worker previously polled every 0.5s. That is a noticeable wake-up gap
+# between "user said do X" and "step starts running". Any function that
+# mutates task/step state fires `_notify_subscribers()` so a subscriber can
+# flip an asyncio.Event in its own loop (via `loop.call_soon_threadsafe`)
+# and pick the work up immediately. Subscribers are raw callables kept
+# short — they must not do real work; just signal.
+_SUBSCRIBERS: list = []
+
+
+def subscribe(cb) -> None:
+    """Register a zero-arg callable fired after every state mutation.
+    Safe to call before `connect()`."""
+    with _DB_LOCK:
+        if cb not in _SUBSCRIBERS:
+            _SUBSCRIBERS.append(cb)
+
+
+def unsubscribe(cb) -> None:
+    with _DB_LOCK:
+        try:
+            _SUBSCRIBERS.remove(cb)
+        except ValueError:
+            pass
+
+
+def _notify_subscribers() -> None:
+    for cb in list(_SUBSCRIBERS):
+        try:
+            cb()
+        except Exception as e:
+            print(f"[tasks] subscriber error: {e}")
+
 TASK_STATUSES = {"planned", "running", "done", "failed",
                  "awaiting_user", "cancelled"}
 STEP_STATUSES = {"planned", "ready", "running", "done", "failed",
@@ -146,7 +180,9 @@ def create_task(goal: str, parent_id: int | None = None,
             (goal, _now(), _now(), parent_id, idempotency_key),
         )
         _DB.commit()
-        return int(cur.lastrowid)
+        new_id = int(cur.lastrowid)
+    _notify_subscribers()
+    return new_id
 
 
 def set_task_status(task_id: int, status: str, result: str | None = None) -> None:
@@ -159,6 +195,7 @@ def set_task_status(task_id: int, status: str, result: str | None = None) -> Non
             (status, _now(), result, task_id),
         )
         _DB.commit()
+    _notify_subscribers()
 
 
 def get_task(task_id: int) -> dict | None:
@@ -204,7 +241,9 @@ def add_step(task_id: int, idx: int, verb: str, tool: str,
              timeout_s),
         )
         _DB.commit()
-        return int(cur.lastrowid)
+        new_id = int(cur.lastrowid)
+    _notify_subscribers()
+    return new_id
 
 
 def set_step_status(step_id: int, status: str,
@@ -234,6 +273,7 @@ def set_step_status(step_id: int, status: str,
         vals.append(step_id)
         _DB.execute(f"UPDATE steps SET {', '.join(cols)} WHERE id=?", vals)
         _DB.commit()
+    _notify_subscribers()
 
 
 def get_step(step_id: int) -> dict | None:
@@ -295,6 +335,7 @@ def cancel_task(task_id: int) -> None:
             (_now(), task_id),
         )
         _DB.commit()
+    _notify_subscribers()
 
 
 def cancel_pending_steps(task_id: int, except_ids: Iterable[int] | None = None) -> int:

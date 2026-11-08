@@ -261,6 +261,31 @@ def _truncate_value(val: str) -> str:
     return val
 
 
+def _normalize_for_dedup(val: str) -> str:
+    """Case-fold + collapse whitespace so trivial variants of the same answer
+    collide. Punctuation is kept because "blue, please" and "blue" are
+    legitimately different."""
+    return " ".join(str(val).strip().casefold().split())
+
+
+def _sibling_has_value(siblings: dict, normalized: str,
+                       excluded_key: str | None = None) -> str | None:
+    """Return the name of a sibling leaf already holding the same normalized
+    value, or None. Used by _recursive_update to drop writes that would create
+    a duplicate record under a different key within the same category."""
+    for k, v in siblings.items():
+        if k == excluded_key:
+            continue
+        if not isinstance(v, dict):
+            continue
+        existing = v.get("value")
+        if existing is None:
+            continue
+        if _normalize_for_dedup(existing) == normalized:
+            return k
+    return None
+
+
 def _recursive_update(target: dict, updates: dict) -> bool:
     changed = False
     for key, value in updates.items():
@@ -276,11 +301,24 @@ def _recursive_update(target: dict, updates: dict) -> bool:
                 changed = True
         else:
             new_val  = _truncate_value(str(value["value"] if isinstance(value, dict) else value))
-            entry    = {"value": new_val, "updated": datetime.now().strftime("%Y-%m-%d")}
             existing = target.get(key, {})
-            if not isinstance(existing, dict) or existing.get("value") != new_val:
-                target[key] = entry
-                changed = True
+            if isinstance(existing, dict) and existing.get("value") == new_val:
+                continue   # exact same key+value already present; no-op.
+            # Duplicate-across-keys check: if another sibling leaf already
+            # stores the same normalized value, drop the write so the memory
+            # does not accumulate parallel aliases ("favorite_color":"blue"
+            # and "color":"blue"). The original key wins — timestamps are
+            # not refreshed to avoid a write amplification loop.
+            normalized = _normalize_for_dedup(new_val)
+            dup = _sibling_has_value(target, normalized, excluded_key=key)
+            if dup is not None:
+                print(f"[Memory] ↷ duplicate skipped: {key}={new_val!r} already under {dup!r}")
+                continue
+            target[key] = {
+                "value":   new_val,
+                "updated": datetime.now().strftime("%Y-%m-%d"),
+            }
+            changed = True
     return changed
 
 

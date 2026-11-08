@@ -26,6 +26,8 @@ from core import tasks as _tasks
 from core import journal as _journal
 from core import gemini as _gem
 from core import planner as _planner
+from core import killswitch as _killswitch
+from core.resource_gate import OPEN_GATE
 
 
 # How often to poll for ready work. The main loop is event-driven for user
@@ -71,7 +73,9 @@ class TaskWorker:
 
     def __init__(self, dispatch: Dispatcher,
                  notify: Notifier | None = None,
-                 declarations: DeclarationProvider | None = None):
+                 declarations: DeclarationProvider | None = None,
+                 resource_gate: Any | None = None,
+                 notify_queue: Any | None = None):
         self._dispatch = dispatch
         self._notify = notify or (lambda _m: None)
         # Declaration provider is read lazily on each replan so plugins that
@@ -79,14 +83,41 @@ class TaskWorker:
         # provider disables replanning (worker still runs the arg-level repair
         # path exactly as before).
         self._declarations = declarations
+        # Gate defaults to the always-open sentinel, so existing callers get
+        # exactly the old behavior. Pass a real ResourceGate() when the
+        # host might be loaded.
+        self._gate = resource_gate if resource_gate is not None else OPEN_GATE
+        # Optional durable notification queue. When set, terminal task
+        # transitions (done/failed/cancelled) are enqueued for sink fan-out
+        # with a dedup key `task:<id>:<status>`. The voice/UI _notify path
+        # still fires in parallel for immediacy.
+        self._notify_queue = notify_queue
         self._stop = asyncio.Event()
+        # Event-driven wake — tasks.subscribe hands us a thread-safe setter so
+        # user turns and step completions kick the loop immediately rather
+        # than waiting for the next poll tick. The 0.5s sleep below is the
+        # fallback heartbeat when nothing fired.
+        self._nudge = asyncio.Event()
         self._inflight: dict[int, asyncio.Task] = {}
 
     def stop(self) -> None:
         self._stop.set()
 
     async def run(self) -> None:
-        """Main loop. Awaits until stop() is called or cancelled."""
+        """Main loop. Awaits until stop() is called or cancelled.
+
+        Wake pattern: block on `self._nudge` with a `_POLL_SECONDS` timeout.
+        Any task-store mutation sets the nudge from any thread via
+        `loop.call_soon_threadsafe`, so new work is picked up with near-zero
+        latency; the timeout is just the safety heartbeat.
+        """
+        loop = asyncio.get_event_loop()
+        def _wake():
+            try:
+                loop.call_soon_threadsafe(self._nudge.set)
+            except RuntimeError:
+                pass   # loop already closed
+        _tasks.subscribe(_wake)
         self._rehydrate()
         self._notify("SYS: Agent worker online.")
         try:
@@ -96,8 +127,14 @@ class TaskWorker:
                 except Exception as e:
                     print(f"[Worker] tick error: {e}")
                     traceback.print_exc()
-                await asyncio.sleep(_POLL_SECONDS)
+                try:
+                    await asyncio.wait_for(self._nudge.wait(),
+                                           timeout=_POLL_SECONDS)
+                except asyncio.TimeoutError:
+                    pass
+                self._nudge.clear()
         finally:
+            _tasks.unsubscribe(_wake)
             for t in list(self._inflight.values()):
                 t.cancel()
 
@@ -115,6 +152,12 @@ class TaskWorker:
                     )
 
     async def _tick(self) -> None:
+        # Honor the emergency stop before anything else.
+        if _killswitch.is_active():
+            for t in list(self._inflight.values()):
+                t.cancel()
+            self._stop.set()
+            return
         # Reap finished dispatches.
         for sid in list(self._inflight):
             t = self._inflight[sid]
@@ -131,6 +174,10 @@ class TaskWorker:
 
         free = _MAX_INFLIGHT - len(self._inflight)
         if free <= 0:
+            return
+        # Resource gate — pause new dequeues under heavy load. In-flight
+        # steps keep running; only new work is deferred for one tick.
+        if not self._gate.allow():
             return
         ready = _tasks.ready_steps(limit=free)
         for step in ready:
@@ -349,13 +396,38 @@ class TaskWorker:
             t = _tasks.get_task(task_id)
             if t:
                 self._notify(f"SYS: Task #{task_id} failed — {t['goal'][:60]}")
+                self._enqueue_terminal(task_id, "failed", t["goal"])
         elif "cancelled" in statuses and "done" not in statuses:
             _tasks.set_task_status(task_id, "cancelled")
+            t = _tasks.get_task(task_id)
+            if t:
+                self._enqueue_terminal(task_id, "cancelled", t["goal"])
         else:
             _tasks.set_task_status(task_id, "done")
             t = _tasks.get_task(task_id)
             if t:
                 self._notify(f"SYS: ✓ Task #{task_id} done — {t['goal'][:60]}")
+                self._enqueue_terminal(task_id, "done", t["goal"])
+
+    def _enqueue_terminal(self, task_id: int, status: str, goal: str) -> None:
+        """Best-effort enqueue into the durable notification queue. Silent
+        when no queue is wired — the voice/UI path has already fired."""
+        q = self._notify_queue
+        if q is None:
+            return
+        try:
+            q.enqueue(
+                {
+                    "kind": f"task_{status}",
+                    "task_id": task_id,
+                    "goal": goal[:160],
+                    "title": "JARVIS",
+                    "message": f"Task #{task_id} {status} — {goal[:60]}",
+                },
+                dedup_key=f"task:{task_id}:{status}",
+            )
+        except Exception as e:
+            print(f"[Worker] notify enqueue failed: {e}")
 
 
 def _verify(spec: dict | None, result: Any, tool: str, args: dict,

@@ -264,6 +264,27 @@ tailwind.config = {
     .sidebar.open{transform:translateX(0)}
     .sidebar .lbl-txt,.sidebar .brand-word,.sidebar .profile-meta,.sidebar .eyebrow,.sidebar .sidebar-search,.sidebar .nav-badge{opacity:1 !important;pointer-events:auto !important}
   }
+  /* P3.5 — tighter phone breakpoint (iPhone 12 Pro = 390px). Collapses
+     multi-column grids to one column, shrinks hero padding, lets tables
+     scroll horizontally rather than breaking layout, respects iOS
+     notch / home-indicator via env(safe-area-inset-*). */
+  @media (max-width: 640px){
+    body{-webkit-text-size-adjust:100%}
+    .hero, main, .page-body, section > .grid{padding-left:12px !important;padding-right:12px !important}
+    .grid-cols-2, .grid-cols-3, .grid-cols-4,
+    [class*=" grid-cols-"], [class^="grid-cols-"]{
+      grid-template-columns: 1fr !important;
+    }
+    .card, .holo, .kanban-col{border-radius:14px}
+    .donut-wrap{width:140px;height:140px}
+    table.data-table{display:block;overflow-x:auto;white-space:nowrap}
+    .spark{height:22px}
+    .scrim.show{backdrop-filter:blur(6px)}
+    body{padding-bottom:env(safe-area-inset-bottom)}
+  }
+  @media (max-width: 420px){
+    .sidebar{width:88vw !important}
+  }
 
   /* empty state */
   .empty{padding:48px 20px;text-align:center;color:var(--inkdim);font-size:13px}
