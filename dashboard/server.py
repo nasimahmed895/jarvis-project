@@ -1,8 +1,9 @@
 """
-dashboard/server.py — JARVIS Local HTTP Dashboard
+dashboard/server.py — JARVIS Local HTTPS Dashboard
 
-Plain HTTP on port 8000 (no SSL warnings, no firewall issues).
-Security at the application layer: AES-256-CBC with session-key-derived key.
+HTTPS on port 8000 with an auto-generated self-signed certificate (browsers
+will show a cert warning on first visit — click through to proceed).
+Extra application-layer crypto: AES-256-CBC with a session-key-derived key.
 CryptoJS is auto-downloaded once and served locally — no CDN needed after that.
 
 Install deps:  pip install fastapi "uvicorn[standard]" cryptography
