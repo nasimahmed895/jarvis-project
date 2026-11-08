@@ -97,12 +97,24 @@ def _init_schema() -> None:
         CREATE INDEX IF NOT EXISTS idx_tasks_status   ON tasks(status);
         """
     )
-    # Idempotent migration: older databases predate replan_count. SQLite has no
-    # ADD COLUMN IF NOT EXISTS, so swallow the duplicate-column error.
-    try:
-        _DB.execute("ALTER TABLE tasks ADD COLUMN replan_count INTEGER NOT NULL DEFAULT 0")
-    except sqlite3.OperationalError:
-        pass
+    # Idempotent migrations: SQLite has no ADD COLUMN IF NOT EXISTS, so
+    # each ALTER is wrapped and the duplicate-column error swallowed.
+    for ddl in (
+        "ALTER TABLE tasks ADD COLUMN replan_count INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE tasks ADD COLUMN idempotency_key TEXT DEFAULT NULL",
+        "ALTER TABLE steps ADD COLUMN timeout_s INTEGER DEFAULT NULL",
+        "ALTER TABLE steps ADD COLUMN duration_s REAL DEFAULT NULL",
+    ):
+        try:
+            _DB.execute(ddl)
+        except sqlite3.OperationalError:
+            pass
+    # Unique index on non-null keys; SQLite treats each NULL as distinct,
+    # so unkeyed tasks are never considered duplicates of each other.
+    _DB.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_idempotency "
+        "ON tasks(idempotency_key) WHERE idempotency_key IS NOT NULL"
+    )
     _DB.commit()
 
 
@@ -112,12 +124,26 @@ def _now() -> float:
 
 # ── Tasks ────────────────────────────────────────────────────────────────────
 
-def create_task(goal: str, parent_id: int | None = None) -> int:
+def create_task(goal: str, parent_id: int | None = None,
+                idempotency_key: str | None = None) -> int:
+    """Insert a task row. When `idempotency_key` is given and a task with the
+    same key exists in any non-terminal or terminal state, return that task's
+    id instead of creating a duplicate — this is how the agent layer avoids
+    double-dispatching the same user request.
+    """
     with _DB_LOCK:
+        if idempotency_key:
+            row = _DB.execute(
+                "SELECT id FROM tasks WHERE idempotency_key=?",
+                (idempotency_key,),
+            ).fetchone()
+            if row:
+                return int(row["id"])
         cur = _DB.execute(
-            "INSERT INTO tasks(goal, status, created_at, updated_at, parent_id) "
-            "VALUES(?, 'planned', ?, ?, ?)",
-            (goal, _now(), _now(), parent_id),
+            "INSERT INTO tasks(goal, status, created_at, updated_at, "
+            "parent_id, idempotency_key) "
+            "VALUES(?, 'planned', ?, ?, ?, ?)",
+            (goal, _now(), _now(), parent_id, idempotency_key),
         )
         _DB.commit()
         return int(cur.lastrowid)
@@ -164,16 +190,18 @@ def list_tasks(status: str | Iterable[str] | None = None,
 
 def add_step(task_id: int, idx: int, verb: str, tool: str,
              args: dict | None = None, deps: list[int] | None = None,
-             verify: dict | None = None) -> int:
+             verify: dict | None = None,
+             timeout_s: int | None = None) -> int:
     with _DB_LOCK:
         cur = _DB.execute(
             "INSERT INTO steps(task_id, idx, verb, tool, args_json, "
-            "deps_json, verify_json, status) "
-            "VALUES(?, ?, ?, ?, ?, ?, ?, 'planned')",
+            "deps_json, verify_json, status, timeout_s) "
+            "VALUES(?, ?, ?, ?, ?, ?, ?, 'planned', ?)",
             (task_id, idx, verb, tool,
              json.dumps(args or {}),
              json.dumps(deps or []),
-             json.dumps(verify) if verify else None),
+             json.dumps(verify) if verify else None,
+             timeout_s),
         )
         _DB.commit()
         return int(cur.lastrowid)
@@ -195,6 +223,14 @@ def set_step_status(step_id: int, status: str,
         if status in ("done", "failed", "cancelled"):
             cols.append("finished_at=?")
             vals.append(now)
+            # Fill duration_s from started_at when available, so every
+            # terminal row carries a wall-clock measurement.
+            row = _DB.execute(
+                "SELECT started_at FROM steps WHERE id=?", (step_id,)
+            ).fetchone()
+            if row and row["started_at"] is not None:
+                cols.append("duration_s=?")
+                vals.append(max(0.0, now - float(row["started_at"])))
         vals.append(step_id)
         _DB.execute(f"UPDATE steps SET {', '.join(cols)} WHERE id=?", vals)
         _DB.commit()

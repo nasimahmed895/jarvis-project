@@ -90,6 +90,69 @@ def _decrypt_cbc(aes_key: bytes, enc_b64: str) -> str:
     return (unpadder.update(padded) + unpadder.finalize()).decode('utf-8')
 
 
+# ── Per-IP token-bucket rate limiter ──────────────────────────────────────────
+#
+# In-process, dependency-free. Guards /api/* and /login against brute-force and
+# noisy clients. Keyed by request.client.host. Buckets older than _RL_IDLE_SECS
+# are reaped on insert so the dict cannot grow unbounded.
+
+_RL_IDLE_SECS = 300.0
+
+
+class _TokenBucket:
+    """Classic token bucket: `capacity` tokens, refill at `rate`/sec."""
+    __slots__ = ("capacity", "rate", "tokens", "last")
+
+    def __init__(self, capacity: float, rate: float):
+        self.capacity = capacity
+        self.rate     = rate
+        self.tokens   = capacity
+        self.last     = time.monotonic()
+
+    def allow(self, cost: float = 1.0) -> bool:
+        now  = time.monotonic()
+        self.tokens = min(self.capacity, self.tokens + (now - self.last) * self.rate)
+        self.last   = now
+        if self.tokens >= cost:
+            self.tokens -= cost
+            return True
+        return False
+
+
+class _RateLimiter:
+    """Per-IP, per-scope token buckets. `scope` picks the (capacity, rate) policy."""
+
+    # scope → (capacity, refill_per_sec)
+    POLICIES = {
+        "api":   (60, 10.0),   # 10 req/s sustained, burst 60
+        "login": (10,  1.0),   # 1  req/s sustained, burst 10 — brute-force guard
+    }
+
+    def __init__(self):
+        self._buckets: dict[tuple[str, str], _TokenBucket] = {}
+        self._touched: dict[tuple[str, str], float] = {}
+
+    def check(self, ip: str, scope: str) -> bool:
+        key = (ip, scope)
+        bucket = self._buckets.get(key)
+        if bucket is None:
+            cap, rate = self.POLICIES.get(scope, self.POLICIES["api"])
+            bucket = _TokenBucket(cap, rate)
+            self._buckets[key] = bucket
+            self._reap()
+        self._touched[key] = time.monotonic()
+        return bucket.allow()
+
+    def _reap(self) -> None:
+        if len(self._buckets) < 256:
+            return
+        cutoff = time.monotonic() - _RL_IDLE_SECS
+        stale  = [k for k, t in self._touched.items() if t < cutoff]
+        for k in stale:
+            self._buckets.pop(k, None)
+            self._touched.pop(k, None)
+
+
 # ── CryptoJS (auto-download once, served locally) ─────────────────────────────
 _CRYPTOJS_CDN  = ("https://cdnjs.cloudflare.com/ajax/libs/"
                   "crypto-js/4.2.0/crypto-js.min.js")
@@ -471,6 +534,8 @@ class DashboardServer:
         self._uploads_dir                 = UPLOADS_DIR
         self._login_html                  = _read("login.html")
         self._app_html                    = _read("app.html")
+        self._rate_limiter                = _RateLimiter()
+        self._started_at                  = time.time()
         self.app                          = self._build_app()
 
     # ── one-time key management ───────────────────────────────────────────
@@ -537,6 +602,34 @@ class DashboardServer:
 
     def _build_app(self) -> "FastAPI":
         app = FastAPI(docs_url=None, redoc_url=None)
+
+        # ── rate-limit middleware: /api/* and /login (per client IP) ────────
+        @app.middleware("http")
+        async def _rate_limit(request: "Request", call_next):
+            path = request.url.path
+            scope = None
+            if path == "/login":
+                scope = "login"
+            elif path.startswith("/api/"):
+                scope = "api"
+            if scope is not None:
+                ip = request.client.host if request.client else "unknown"
+                if not self._rate_limiter.check(ip, scope):
+                    return JSONResponse(
+                        {"error": "Rate limit exceeded"},
+                        status_code=429,
+                        headers={"Retry-After": "1"},
+                    )
+            return await call_next(request)
+
+        @app.get("/health")
+        async def health():
+            return JSONResponse({
+                "status":   "ok",
+                "uptime_s": round(time.time() - self._started_at, 1),
+                "clients":  len(self._clients),
+                "tokens":   len(self._tokens),
+            })
 
         def _auth(req: Request) -> bool:
             tok = req.headers.get("authorization", "").removeprefix("Bearer ").strip()

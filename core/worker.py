@@ -165,8 +165,25 @@ class TaskWorker:
                     _journal.write("step_done", step_id=sid, verb=verb,
                                    tool=tool, result=text, repairs=repairs)
                     return
+                timeout_s = step.get("timeout_s")
                 try:
-                    result = await self._dispatch(tool, args)
+                    if timeout_s and float(timeout_s) > 0:
+                        result = await asyncio.wait_for(
+                            self._dispatch(tool, args),
+                            timeout=float(timeout_s),
+                        )
+                    else:
+                        result = await self._dispatch(tool, args)
+                except asyncio.TimeoutError:
+                    err = f"timeout after {timeout_s}s"
+                    _journal.write("step_timeout", step_id=sid, tool=tool,
+                                   args=args, timeout_s=timeout_s,
+                                   repairs=repairs)
+                    _tasks.set_step_status(sid, "failed", error=err)
+                    if await self._attempt_replan(task_id, step, err):
+                        return
+                    self._notify(f"SYS: ✗ {verb} — {err}")
+                    return
                 except Exception as e:
                     err = f"{type(e).__name__}: {str(e)[:200]}"
                     _journal.write("step_error", step_id=sid, tool=tool,
