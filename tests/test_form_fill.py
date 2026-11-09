@@ -60,7 +60,7 @@ def test_fills_when_required_present(stub_bc):
     fields = fills[0].get("fields", {})
     assert fields.get("first_name") == "Ada"
     assert fields.get("email") == "ada@example.com"
-    assert "approve the submit" in out.lower()
+    assert "approve submit" in out.lower()
 
 
 def test_submit_after_is_gated_lvl2_passthrough_no_hud(stub_bc):

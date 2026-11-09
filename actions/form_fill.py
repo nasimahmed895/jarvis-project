@@ -116,13 +116,81 @@ def form_fill(parameters: dict | None = None,
     # ad-hoc set_pref values also contribute.
     res = _run_bc("fill_form", fields=values, use_prefs=True)
 
+    # Pre-submission validation: reject FAILED fills immediately.
+    if res.startswith("FAILED:"):
+        return (
+            "FILL FAILED — form was NOT touched. Cannot proceed to submit.\n"
+            + res
+            + "\nRun inspect_form, correct the field names, and retry."
+        )
+
     if not submit_after:
-        return ("Form filled with profile values. Review the page and "
-                "approve the submit when ready.\nFill result: " + res)
+        status = "PARTIAL" if res.startswith("PARTIAL:") else "COMPLETE"
+        return (
+            f"Form filled ({status}). Review the page and approve submit when ready.\n"
+            "Fill result: " + res
+        )
+
+    # Refuse to submit when fill was only partial.
+    if res.startswith("PARTIAL:"):
+        return (
+            "PARTIAL FILL — refusing to submit until all required fields are verified.\n"
+            + res
+            + "\nCorrect the missed fields, then retry with submit_after=true."
+        )
 
     # Gated submit. Use core/approval so the HUD banner issues the token.
     def _do_submit() -> str:
-        return _run_bc("click", text=(params.get("submit_label") or "Submit"))
+        click_res = _run_bc("click", text=(params.get("submit_label") or "Submit"))
+
+        # Post-submit verification: read page for confirmation or error.
+        import time as _time
+        _time.sleep(1.5)  # let the page settle after submit
+
+        url_after = _run_bc("get_url")
+        text_after = _run_bc("get_text")
+
+        # Success signals
+        success_patterns = (
+            "success", "thank you", "confirmed", "submitted", "received",
+            "congratulations", "complete", "done", "sent", "registered",
+            "সফল", "ধন্যবাদ", "নিশ্চিত",  # Bengali equivalents
+        )
+        # Error signals
+        error_patterns = (
+            "error", "invalid", "required", "please fill", "failed",
+            "try again", "went wrong", "ত্রুটি", "পূরণ করুন",
+        )
+
+        body_lower = (text_after or "").lower()
+        url_changed = (url_after or "").strip() not in ("", url or "")
+
+        has_success = any(p in body_lower for p in success_patterns)
+        has_error   = any(p in body_lower for p in error_patterns)
+
+        if has_error and not has_success:
+            return (
+                "SUBMISSION REJECTED — page shows errors after submit.\n"
+                f"Submit click: {click_res}\n"
+                f"URL after: {url_after}\n"
+                f"Page signals: {', '.join(p for p in error_patterns if p in body_lower)}"
+            )
+
+        if has_success or url_changed:
+            return (
+                "SUBMISSION VERIFIED — success signal observed.\n"
+                f"Submit click: {click_res}\n"
+                f"URL after: {url_after}\n"
+                f"Page signals: {', '.join(p for p in success_patterns if p in body_lower)}"
+                + (" | URL changed" if url_changed else "")
+            )
+
+        return (
+            "SUBMISSION ATTEMPTED — submit was clicked but result is ambiguous.\n"
+            f"Submit click: {click_res}\n"
+            f"URL after: {url_after}\n"
+            "No clear success or error signal detected. Verify manually."
+        )
 
     return _approval.gate(
         tool="form_fill",
