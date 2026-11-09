@@ -991,6 +991,103 @@ class DashboardServer:
             except Exception as e:
                 return JSONResponse({"ok": True, "items": [], "error": str(e)})
 
+        # ── Browser automation panel ──────────────────────────────────────
+        # Surfaces: tasks whose plan touches the browser, the latest
+        # screenshot the model saved, and a simple pause/resume/stop hook.
+        # The real browser session lives in actions/browser_control.py; this
+        # endpoint only READS state — control actions go through /api/command
+        # so the Live session executes them with full gating.
+        _BROWSER_TOOLS = ("browser_control", "browser_flow", "jobs",
+                          "real_estate", "education", "customer_support",
+                          "social_media", "flight_finder", "travel",
+                          "market_research", "web_search", "morning_briefing")
+
+        def _browser_touching(tasks_mod, row: dict) -> bool:
+            try:
+                steps = tasks_mod.task_steps(row["id"])
+            except Exception:
+                return False
+            return any((s.get("tool") or "") in _BROWSER_TOOLS for s in steps)
+
+        def _latest_screenshot() -> dict | None:
+            shots_dir = _MEM_DIR.parent / "logs" / "screenshots"
+            if not shots_dir.exists():
+                return None
+            try:
+                latest = max(shots_dir.glob("*.png"),
+                             key=lambda p: p.stat().st_mtime, default=None)
+            except Exception:
+                return None
+            if latest is None:
+                return None
+            st = latest.stat()
+            return {
+                "path":       str(latest),
+                "name":       latest.name,
+                "mtime":      st.st_mtime,
+                "size_bytes": st.st_size,
+            }
+
+        @app.get("/api/data/browser")
+        async def data_browser(req: Request, limit: int = 25):
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            try:
+                from core import tasks as _t
+                _t.connect(_MEM_DIR / "tasks.sqlite")
+                n = max(1, min(int(limit), 100))
+                all_tasks = _t.list_tasks(limit=n * 3)
+                items = [_summarise_task(_t, r) for r in all_tasks
+                         if _browser_touching(_t, r)][:n]
+                # Running task — the most recent one in `running` state, if any.
+                active = next((r for r in all_tasks
+                               if r.get("status") == "running"
+                               and _browser_touching(_t, r)), None)
+                active_steps = []
+                if active:
+                    try:
+                        active_steps = _t.task_steps(active["id"])
+                    except Exception:
+                        pass
+                return JSONResponse({
+                    "ok":       True,
+                    "items":    items,
+                    "active":   _summarise_task(_t, active) if active else None,
+                    "active_steps": [
+                        {"idx": s.get("idx"),
+                         "verb": s.get("verb"),
+                         "tool": s.get("tool"),
+                         "status": s.get("status"),
+                         "error": (s.get("error") or "")[:200]}
+                        for s in active_steps
+                    ],
+                    "screenshot": _latest_screenshot(),
+                })
+            except Exception as e:
+                return JSONResponse({"ok": True, "items": [], "error": str(e)})
+
+        @app.post("/api/data/browser/stop")
+        async def data_browser_stop(req: Request):
+            """Mark all currently-running browser-touching tasks as cancelled.
+            The worker's next tick observes the state change and stops
+            dispatching further steps. Running steps complete naturally —
+            this is the safe way to stop; it does not kill a mid-flight HTTP
+            call."""
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            try:
+                from core import tasks as _t
+                _t.connect(_MEM_DIR / "tasks.sqlite")
+                cancelled = []
+                for r in _t.list_tasks(status="running", limit=100):
+                    if _browser_touching(_t, r):
+                        _t.set_task_status(r["id"], "cancelled",
+                                           "Stopped from dashboard.")
+                        cancelled.append(r["id"])
+                return JSONResponse({"ok": True, "cancelled": cancelled})
+            except Exception as e:
+                return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
         @app.get("/api/v1/metrics")
         async def v1_metrics(req: Request):
             """P3.4 — CPU / RAM / disk snapshot for the health panel."""

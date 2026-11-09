@@ -61,3 +61,87 @@ Several P2+ features require optional packages. Installation is only needed when
 python3 -m pytest           # full suite (baseline: 525 green)
 python3 -m pytest -v tests/test_logging_setup.py
 ```
+
+## Browser automation
+
+JARVIS can drive a real browser end-to-end. The engine is Playwright plus,
+on macOS Chromium-family browsers, AppleScript — so the assistant controls
+the browser the user is already signed into instead of an isolated sandbox.
+
+### One-time setup
+
+```bash
+pip install -r requirements.txt
+python3 -m playwright install chromium   # browser binary for headless jobs
+# macOS Chrome/Brave/Edge only: enable "Allow JavaScript from Apple Events"
+#   View → Developer → Allow JavaScript from Apple Events  (or: action="enable_js")
+```
+
+### Tool surface (Gemini Live sees)
+
+| Tool | Purpose | Approval level |
+|---|---|---|
+| `browser_control` | Low-level verbs: `go_to`, `search`, `click`, `type`, `scroll`, `screenshot`, `get_text`, `fill_form`, tabs, `smart_click`, `smart_type` | LVL1 for reads/nav, LVL2 for form submits, LVL3 for `start_debug` |
+| `web_search` | Google / Bing / DDG queries with compare and research modes | LVL1 |
+| `jobs` | Listing search, resume matching, cover-letter drafting, gated apply | LVL3 on `apply` |
+| `real_estate` | Property portals, side-by-side compare, gated inquiries | LVL2 on `inquire` |
+| `education` | Courses / papers / scholarships / study plans, gated enrol | LVL3 on `enroll` |
+| `customer_support` | KB search, ticket drafting, thread summarisation, gated portal submit | LVL2 on `open_ticket` |
+| `social_media` | Draft post sized to the platform, hashtag suggestions, gated publish | LVL2 on `publish` |
+| `travel`, `flight_finder`, `youtube_video`, `morning_briefing`, `email_manager`, `calendar_manager`, `crm`, `market_research`, `meeting_prep`, `report_gen`, `grounded`, `research` | Pre-existing module coverage | per-module |
+
+A full multi-step goal is handled by `core/planner.py` → `core/worker.py`:
+the planner asks Gemini for a JSON step list, the worker dispatches each
+step, verifies, and resumes across restarts.
+
+### Approval model
+
+`core/approval.py` classifies every action into three levels:
+
+- **LVL1 — read-only / reversible.** Runs without prompting (searches, page
+  reads, navigation, screenshots, downloads to a local folder).
+- **LVL2 — mutating but recoverable.** Asks on the HUD unless the user has
+  pre-approved the category via `config/approval.json`. Categories include
+  `email_draft`, `calendar_write`, `social_post`, `form_submit`,
+  `upload_file`, `crm_write`.
+- **LVL3 — irreversible or financial.** Always routed through
+  `core/confirm.py` — the HUD banner issues the confirmation token; the
+  model never does. Examples: payments, shutdown/restart, delete-file,
+  send-email, submit-job-application, start-debug-browser.
+
+LVL3 cannot be bypassed from the model side. If the HUD is not bound
+(headless or test context), LVL3 refuses rather than running.
+
+### Example commands (voice or text)
+
+```
+Jarvis, find five Python remote jobs under three hundred a day and rank them against my resume.
+Jarvis, search Zillow for a two-bed in Lisbon for rent, compare the best three.
+Jarvis, draft a cover letter for the LinkedIn listing currently on screen.
+Jarvis, draft a LinkedIn post about today's release and suggest five hashtags.
+Jarvis, prepare a support ticket for the WidgetCo portal — login fails on Android after 2.4.1.
+Jarvis, build me a four-week Rust study plan for six hours a week.
+Jarvis, open my inbox and summarise anything from last night marked urgent.
+Jarvis, search for PhD scholarships in machine learning in Europe.
+```
+
+### Dashboard
+
+`/api/data/browser` (GET) returns tasks whose plans touch browser-adjacent
+tools, the latest screenshot on disk, and the currently-running task's
+step list. `/api/data/browser/stop` (POST) cancels all running
+browser-touching tasks — running steps complete; the worker stops
+dispatching further ones.
+
+### Limitations and non-goals
+
+- CAPTCHAs, MFA codes, identity challenges: **always** handed back to the
+  user. The engine never attempts to solve them and never relays them to a
+  third party.
+- Payments, money transfers, legal / tax / government submissions: LVL3 —
+  the user must press CONFIRM on the HUD banner.
+- Platform rule evasion (follow-for-follow, mass DM, fake engagement,
+  scraping behind authentication the user did not authorise): refused at
+  the prompt layer in the relevant module.
+- Secrets never land in logs or the dashboard. See `core/secrets.py` for
+  credential storage.

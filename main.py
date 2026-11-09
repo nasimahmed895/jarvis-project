@@ -671,6 +671,15 @@ class JarvisLive:
         self._vstream_prev_hist = None                # last frame histogram
         self._vstream_fps:     float         = 1.0    # frames/sec target
         self._interrupted          = False   # True while draining audio after user interrupt
+        # Interleaving a client turn (send_client_content) with an in-flight
+        # tool-call cycle makes some Live server builds close the socket with
+        # 1007 — see the comment inside _execute_tool. Interim speak() calls
+        # from long-running action handlers hit exactly that path: the model
+        # says "please wait, I am updating you", the interim send corrupts the
+        # cycle, the FunctionResponse never generates audio, and the user
+        # hears nothing more. While this flag is True, speak() diverts to the
+        # UI log instead of the session.
+        self._in_tool_call         = False
         # Transcript-driven mouth shapes for the avatar. Fed from the receive
         # loop as words arrive, drained by the playback loop against the audio.
         self._visemes              = VisemeStream()
@@ -1187,6 +1196,17 @@ class JarvisLive:
     def speak(self, text: str):
         if not self._loop or not self.session:
             return
+        # Interim progress from a tool handler must not interleave a client
+        # turn with the in-flight tool-call cycle (server closes with 1007
+        # and the final FunctionResponse is lost). Surface the progress line
+        # on-screen instead; the tool's return value is already relayed as
+        # the FunctionResponse and the model vocalises that.
+        if self._in_tool_call:
+            try:
+                self.ui.write_log(f"SYS: {text}")
+            except Exception:
+                pass
+            return
         asyncio.run_coroutine_threadsafe(
             self.session.send_client_content(
                 turns={"role": "user", "parts": [{"text": text}]},
@@ -1368,6 +1388,13 @@ class JarvisLive:
         return out
 
     async def _execute_tool(self, fc) -> types.FunctionResponse:
+        self._in_tool_call = True
+        try:
+            return await self._execute_tool_inner(fc)
+        finally:
+            self._in_tool_call = False
+
+    async def _execute_tool_inner(self, fc) -> types.FunctionResponse:
         name = fc.name
         args = dict(fc.args or {})
 
