@@ -827,6 +827,32 @@ class _BrowserSession:
         self._context: BrowserContext | None = None
         self._page:    Page           | None = None
 
+        # Task anchoring. The old `_page` + `_first_live_page()` fallback
+        # was dangerous on CDP-attached real browsers: if Jarvis's tab
+        # closed (user closed it, site navigated away, …), the recovery
+        # path could silently adopt an UNRELATED tab the user had open
+        # (e.g. ChatGPT) and keep operating on it. Two defences:
+        #   * `_task_url` records the URL Jarvis most recently navigated
+        #     to. Recovery prefers a live tab whose origin matches.
+        #   * `_owned_page_ids` is a set of id(Page) for every tab Jarvis
+        #     created or explicitly navigated. Recovery prefers an owned
+        #     live sibling before falling back to any live tab.
+        # Both lose signal gracefully: if the preferred candidate is
+        # gone, the next-best option is still better than `pages[0]`.
+        self._task_url: str | None = None
+        self._task_origin: str | None = None
+        self._owned_page_ids: set[int] = set()
+
+        # Follow-up turns ("continue", "try again", "submit it") need
+        # a snapshot of what the last browser action looked at and what
+        # it filled. Without this the model has to re-inspect the form
+        # on every turn — and one of the real bugs the user hit was
+        # re-inspecting the WRONG page after losing the anchor.
+        self._last_inspect: str | None = None
+        self._last_fill_summary: str | None = None
+        self._last_action: str | None = None
+        self._last_error: str | None = None
+
     def start(self):
         if self._thread and self._thread.is_alive():
             return
@@ -879,6 +905,44 @@ class _BrowserSession:
                 pass
         self._context = self._page = None
 
+    def is_dead(self) -> bool:
+        """True when this session cannot drive the browser any more —
+        the context was closed, the CDP browser disconnected, or the
+        Playwright process is gone. The registry calls this before
+        returning the cached session; a dead one is evicted so the next
+        call reconnects rather than returning BrowserContext errors
+        forever. This was the "permanent breakage" bug: the user closed
+        an automation-owned window, Playwright tore the context down,
+        and every subsequent `_get_page` call returned the same dead
+        reference."""
+        if self._cdp_browser is not None:
+            try:
+                if not self._cdp_browser.is_connected():
+                    return True
+            except Exception:
+                return True
+        ctx = self._context
+        if ctx is None:
+            # Never been launched yet — not dead, just not alive.
+            return False
+        is_closed = getattr(ctx, "is_closed", None)
+        if callable(is_closed):
+            try:
+                if is_closed():
+                    return True
+            except Exception:
+                return True
+        browser = getattr(ctx, "browser", None)
+        if browser is not None:
+            is_connected = getattr(browser, "is_connected", None)
+            if callable(is_connected):
+                try:
+                    if not is_connected():
+                        return True
+                except Exception:
+                    return True
+        return False
+
     def _ctx_alive(self) -> bool:
         """True when the context is usable for a new page. Safeguards every
         `self._context.new_page()` call — the API throws
@@ -907,20 +971,78 @@ class _BrowserSession:
                     return False
         return True
 
+    @staticmethod
+    def _origin_of(url: str | None) -> str | None:
+        """scheme://host — loose matcher so `example.com/a` and
+        `example.com/b/c?q=x` anchor to the same task."""
+        if not url:
+            return None
+        try:
+            # Standalone parse to avoid dragging urllib into the hot path
+            # when `url` is an easy case ('about:blank', '', None).
+            from urllib.parse import urlparse
+            p = urlparse(url)
+            if not p.scheme or not p.netloc:
+                return None
+            return f"{p.scheme}://{p.netloc}"
+        except Exception:
+            return None
+
+    def _remember_navigation(self, page: Page) -> None:
+        """Mark a page as task-owned and update the task URL anchor."""
+        try:
+            self._owned_page_ids.add(id(page))
+        except Exception:
+            pass
+        try:
+            url = page.url
+        except Exception:
+            url = None
+        if url and url not in ("about:blank", ""):
+            self._task_url = url
+            self._task_origin = self._origin_of(url) or self._task_origin
+
     def _first_live_page(self) -> Page | None:
-        """First non-closed page in the context. Used by tab ops so we
-        never leave `self._page` pointing at a page that has already been
-        closed externally (a Chrome tab close, a site self-navigating
-        window.close, …)."""
+        """Pick a live page from the context, preferring (in order):
+          1. an owned page whose origin matches the current task,
+          2. any owned live page,
+          3. any live page whose origin matches the task,
+          4. any live page at all.
+
+        This prevents the real-browser bug where Jarvis's tab closes and
+        the recovery path silently adopts the user's unrelated tab
+        (ChatGPT, mail, …) that happens to be earlier in `context.pages`.
+        """
         if self._context is None:
             return None
         try:
-            for p in self._context.pages:
-                if not p.is_closed():
-                    return p
+            pages = [p for p in self._context.pages if not p.is_closed()]
         except Exception:
-            pass
-        return None
+            return None
+        if not pages:
+            return None
+
+        origin = getattr(self, "_task_origin", None)
+        owned_ids = getattr(self, "_owned_page_ids", set())
+        owned = [p for p in pages if id(p) in owned_ids]
+
+        def _origin_match(p: Page) -> bool:
+            if not origin:
+                return False
+            try:
+                return self._origin_of(p.url) == origin
+            except Exception:
+                return False
+
+        for p in owned:
+            if _origin_match(p):
+                return p
+        if owned:
+            return owned[0]
+        for p in pages:
+            if _origin_match(p):
+                return p
+        return pages[0]
 
     async def _adopt_page(self) -> Page:
         """
@@ -1116,6 +1238,9 @@ class _BrowserSession:
                 print(f"[Browser] New-tab retry failed: {e}")
 
         if result_url and result_url not in ("about:blank", "", None):
+            # Anchor so follow-up tool calls across turns pick THIS tab
+            # back up, not an unrelated one the user had open.
+            self._remember_navigation(page)
             return f"Opened: {result_url}"
         return f"Could not open: {url}"
 
@@ -1209,13 +1334,36 @@ class _BrowserSession:
 
     async def type_text(self, selector: str = None, text: str = "",
                         clear_first: bool = True) -> str:
+        """Prefer `fill()` over keystroke-simulated `type()`. React and
+        most modern input components ignore keystrokes but accept
+        `fill`'s synthesised input events; the old `.type(delay=50)`
+        path was silently dropping values on half the sites we tried."""
         page = await self._get_page()
         try:
-            el = page.locator(selector).first if selector else page.locator(":focus")
+            el = page.locator(selector).first if selector else \
+                 page.locator(":focus")
             if clear_first:
-                await el.clear()
-            await el.type(text, delay=50)
-            return "Text typed."
+                try:
+                    await el.fill("")
+                except Exception:
+                    try:
+                        await el.clear()
+                    except Exception:
+                        pass
+            try:
+                await el.fill(text)
+            except Exception:
+                # Custom-widget fallback (contenteditable, canvas-backed).
+                await el.click()
+                await el.type(text, delay=20)
+            # Verify when possible.
+            try:
+                observed = await el.input_value()
+                if observed == text:
+                    return f"Text typed (verified): {len(text)} chars."
+            except Exception:
+                pass
+            return f"Text typed: {len(text)} chars."
         except Exception as e:
             return f"Type error: {e}"
 
@@ -1247,6 +1395,256 @@ class _BrowserSession:
     async def get_url(self) -> str:
         page = await self._get_page()
         return page.url
+
+    async def verify_page(self) -> str:
+        """Return a short diagnostic the model (or a dashboard panel) can
+        read to confirm the current tab is still the one the task is
+        operating on. Produced in a consistent one-line-per-fact shape so
+        downstream text parsing is trivial.
+        """
+        page = await self._get_page()
+        try:
+            url = page.url
+        except Exception as e:
+            return f"page.url failed: {e}"
+        try:
+            title = await page.title()
+        except Exception:
+            title = ""
+        origin = self._origin_of(url) or ""
+        on_task = (self._task_origin is None or
+                   origin == self._task_origin)
+        tabs = 0
+        try:
+            tabs = sum(1 for p in self._context.pages if not p.is_closed())
+        except Exception:
+            pass
+        return (
+            "page verify:\n"
+            f"  url: {url}\n"
+            f"  title: {title[:120]}\n"
+            f"  origin: {origin}\n"
+            f"  task_url: {self._task_url}\n"
+            f"  task_origin: {self._task_origin}\n"
+            f"  on_task_url: {on_task}\n"
+            f"  owned: {id(page) in self._owned_page_ids}\n"
+            f"  tabs_open: {tabs}"
+        )
+
+    async def probe_selector(self, selector: str) -> str:
+        """Report whether a CSS / aria selector exists and is visible
+        on the current page. Returns a one-line probe string the caller
+        can grep. This is the "does the stop button exist?" primitive
+        — before this, ai_site.py was searching for raw CSS strings
+        inside body innerText, which always said no."""
+        page = await self._get_page()
+        if not selector:
+            return "probe: selector=(empty) exists=False"
+        try:
+            loc = page.locator(selector).first
+            count = await loc.count()
+            visible = False
+            if count > 0:
+                try:
+                    visible = await loc.is_visible()
+                except Exception:
+                    visible = False
+            return (f"probe: selector={selector!r} exists={count > 0} "
+                    f"visible={visible} count={count}")
+        except Exception as e:
+            return f"probe: selector={selector!r} error={e}"
+
+    async def task_state(self) -> str:
+        """Short, structured summary the model reads to answer
+        'continue' / 'try again' / 'submit it' without re-scanning the
+        page. It names the anchored task URL, the last action performed,
+        and the raw last `inspect_form` / `fill_form` outputs (the model
+        can scan these for field names / verified counts).
+        """
+        page = None
+        try:
+            page = await self._get_page()
+            url = page.url
+        except Exception as e:
+            url = f"(unavailable: {e})"
+        snapshot = [
+            f"task_url:     {self._task_url}",
+            f"task_origin:  {self._task_origin}",
+            f"active_url:   {url}",
+            f"last_action:  {self._last_action}",
+            f"last_error:   {self._last_error}",
+        ]
+        if self._last_inspect:
+            snapshot.append("last_inspect:")
+            snapshot.append("  " + self._last_inspect.replace(
+                "\n", "\n  "))
+        if self._last_fill_summary:
+            snapshot.append("last_fill_summary:")
+            snapshot.append("  " + self._last_fill_summary.replace(
+                "\n", "\n  "))
+        return "\n".join(snapshot)
+
+    async def dismiss_dialogs(self) -> str:
+        """Try to dismiss cookie banners, consent prompts, and modal
+        overlays. Common labels across English and Bengali, limited to a
+        small first-click-wins list to avoid dismissing something the
+        user actually wanted.
+
+        Returns the label of whatever got clicked (or "nothing to
+        dismiss"). This is safe to call once after `go_to` on sites that
+        front-load a cookie banner — the banner otherwise blocks every
+        subsequent click target.
+        """
+        page = await self._get_page()
+        candidates = [
+            # English cookie / consent
+            "Accept all", "Accept All", "Accept cookies", "I agree",
+            "Agree", "Got it", "OK", "Okay", "Close",
+            "Allow all", "Continue",
+            # Bengali equivalents
+            "সব অনুমতি দিন", "আমি রাজি", "সম্মত", "ঠিক আছে",
+            "বন্ধ করুন", "চালিয়ে যান",
+            # Reject-style — avoid: we never auto-reject on the user's behalf
+            # because many sites behave worse with rejected cookies.
+        ]
+        for label in candidates:
+            for role in ("button", "link"):
+                try:
+                    loc = page.get_by_role(role, name=label, exact=False)
+                    if await loc.count() > 0:
+                        await loc.first.click(timeout=2_000)
+                        self._last_action = f"dismissed:{label}"
+                        return f"Dismissed via {role}: '{label}'"
+                except Exception:
+                    continue
+        # Common modal-close CSS fallbacks.
+        for sel in ("[aria-label*='close' i]", ".modal .close",
+                    "button[aria-label='Dismiss']"):
+            try:
+                loc = page.locator(sel).first
+                if await loc.count() > 0:
+                    await loc.click(timeout=2_000)
+                    self._last_action = f"dismissed:{sel}"
+                    return f"Dismissed via CSS: {sel}"
+            except Exception:
+                continue
+        return "Nothing obvious to dismiss."
+
+    async def inspect_form(self, which: str = "primary") -> str:
+        """Return a structured dump of the first (or named) form on the
+        page: inputs, textareas, selects, radios, checkboxes, buttons.
+        Uses page.evaluate so React / dynamic DOMs render the same way
+        the user sees them, not a stale snapshot."""
+        page = await self._get_page()
+        script = """
+        (which) => {
+          const forms = Array.from(document.querySelectorAll('form'));
+          const form  = which === 'primary' ? (forms[0] || document.body)
+                                            : (forms.find(f =>
+                                                (f.name || '').includes(which)
+                                              || (f.id || '').includes(which))
+                                               || forms[0] || document.body);
+          const bb = form.getBoundingClientRect();
+          const visible = (el) => {
+            const s = window.getComputedStyle(el);
+            if (s.display === 'none' || s.visibility === 'hidden'
+                || s.opacity === '0') return false;
+            const r = el.getBoundingClientRect();
+            return r.width > 0 && r.height > 0;
+          };
+          const labelFor = (el) => {
+            if (el.labels && el.labels.length) {
+              return (el.labels[0].innerText || '').trim();
+            }
+            const al = el.getAttribute('aria-label');
+            if (al) return al.trim();
+            const ph = el.getAttribute('placeholder');
+            if (ph) return ph.trim();
+            // Nearest <label> ancestor
+            let p = el.parentElement;
+            while (p && p !== form) {
+              if (p.tagName === 'LABEL') return (p.innerText || '').trim();
+              p = p.parentElement;
+            }
+            return '';
+          };
+          const describe = (el) => ({
+            tag:        el.tagName.toLowerCase(),
+            type:       (el.type || '').toLowerCase(),
+            name:       el.name || '',
+            id:         el.id || '',
+            label:      labelFor(el),
+            placeholder: el.getAttribute('placeholder') || '',
+            required:   !!el.required,
+            disabled:   !!el.disabled,
+            visible:    visible(el),
+            value:      (el.type === 'password') ? '' : (el.value || ''),
+            options:    (el.tagName === 'SELECT')
+                          ? Array.from(el.options).map(o => o.text).slice(0, 20)
+                          : [],
+          });
+          const fields  = Array.from(form.querySelectorAll(
+                              'input, textarea, select'))
+                          .filter(e => (e.type || '') !== 'hidden')
+                          .map(describe);
+          const buttons = Array.from(form.querySelectorAll(
+                              'button, [role="button"], input[type="submit"]'))
+                          .filter(visible)
+                          .map(b => ({
+                            text:  (b.innerText || b.value || '').trim(),
+                            type:  (b.type || '').toLowerCase(),
+                            name:  b.name || '',
+                            id:    b.id || '',
+                            disabled: !!b.disabled,
+                          }));
+          return {
+            forms_count: forms.length,
+            using_body_fallback: forms.length === 0,
+            form: {
+              action: form.getAttribute('action') || '',
+              method: (form.getAttribute('method') || 'get').toLowerCase(),
+              name:   form.name || '',
+              id:     form.id || '',
+            },
+            fields:  fields,
+            buttons: buttons,
+          };
+        }
+        """
+        try:
+            data = await page.evaluate(script, which)
+        except Exception as e:
+            return f"inspect_form error: {e}"
+        # Compact human-readable summary. Full JSON is too large for a
+        # voice reply; we show counts + a field-by-field table.
+        lines = [
+            f"Forms on page: {data.get('forms_count', 0)}"
+            + (" (using <body> fallback)" if data.get('using_body_fallback')
+               else ""),
+            f"Form: name='{data['form'].get('name')}' "
+            f"id='{data['form'].get('id')}' "
+            f"action='{data['form'].get('action')}' "
+            f"method={data['form'].get('method')}",
+            f"Fields: {len(data['fields'])}",
+        ]
+        for f in data["fields"][:30]:
+            lines.append(
+                f"  - {f['tag']}[{f['type'] or '-'}] "
+                f"name='{f['name']}' id='{f['id']}' "
+                f"label={f['label'][:40]!r} "
+                f"required={f['required']} visible={f['visible']}"
+                + (f" options={len(f['options'])}" if f['options'] else "")
+            )
+        lines.append(f"Buttons: {len(data['buttons'])}")
+        for b in data["buttons"][:20]:
+            lines.append(
+                f"  - '{(b['text'] or '').strip()[:40]}' "
+                f"type={b['type'] or '-'} disabled={b['disabled']}"
+            )
+        out = "\n".join(lines)
+        self._last_inspect = out
+        self._last_action = "inspect_form"
+        return out
 
     async def fill_form(self, fields: dict) -> str:
         """Fill a form and VERIFY each field by reading its value back.
@@ -1330,6 +1728,18 @@ class _BrowserSession:
         missed: list[str] = []
         mismatched: list[str] = []
 
+        async def _tag_and_type(locator) -> tuple[str, str]:
+            try:
+                tag = (await locator.evaluate(
+                    "el => el.tagName")).lower()
+            except Exception:
+                tag = ""
+            try:
+                t = (await locator.get_attribute("type") or "").lower()
+            except Exception:
+                t = ""
+            return tag, t
+
         for key, value in fields.items():
             if key == "_missing":
                 continue  # convention used by actions/form_fill.py
@@ -1342,6 +1752,97 @@ class _BrowserSession:
                 await locator.wait_for(state="visible", timeout=4_000)
             except Exception:
                 pass
+
+            tag, input_type = await _tag_and_type(locator)
+
+            # SELECT — use select_option; `value` may be the option
+            # text or its value attribute.
+            if tag == "select":
+                try:
+                    try:
+                        await locator.select_option(label=value_s)
+                    except Exception:
+                        await locator.select_option(value=value_s)
+                except Exception as e:
+                    missed.append(f"{key} (select failed: "
+                                  f"{type(e).__name__})")
+                    continue
+                # Verify selected
+                try:
+                    actual = await locator.input_value()
+                except Exception:
+                    actual = None
+                if actual == value_s:
+                    filled.append(f"{key} [select] = {value_s}")
+                    verified.append(str(key))
+                else:
+                    mismatched.append(f"{key} select wanted={value_s} "
+                                      f"got={actual}")
+                continue
+
+            # CHECKBOX — bool-coerce value; `check` / `uncheck`.
+            if input_type == "checkbox":
+                want_on = str(value).lower() in ("true", "1", "yes",
+                                                  "on", "checked")
+                try:
+                    if want_on:
+                        await locator.check()
+                    else:
+                        await locator.uncheck()
+                except Exception as e:
+                    missed.append(f"{key} (checkbox: "
+                                  f"{type(e).__name__})")
+                    continue
+                try:
+                    is_on = await locator.is_checked()
+                except Exception:
+                    is_on = None
+                if is_on == want_on:
+                    filled.append(f"{key} [checkbox] = "
+                                  f"{'on' if want_on else 'off'}")
+                    verified.append(str(key))
+                else:
+                    mismatched.append(f"{key} checkbox wanted="
+                                      f"{want_on} got={is_on}")
+                continue
+
+            # RADIO — check the input whose value matches `value_s`.
+            if input_type == "radio":
+                try:
+                    # Scope the search to the group by name attribute,
+                    # then match by value or label.
+                    name_attr = await locator.get_attribute("name") or ""
+                    group_sel = (f'input[type="radio"][name="{name_attr}"]'
+                                 if name_attr else 'input[type="radio"]')
+                    # Try locating the exact option.
+                    option = page.locator(
+                        f'{group_sel}[value="{value_s}"]').first
+                    if await option.count() == 0:
+                        option = page.get_by_label(value_s).first
+                    await option.check()
+                    is_on = await option.is_checked()
+                except Exception as e:
+                    missed.append(f"{key} (radio: "
+                                  f"{type(e).__name__})")
+                    continue
+                if is_on:
+                    filled.append(f"{key} [radio] = {value_s}")
+                    verified.append(str(key))
+                else:
+                    mismatched.append(f"{key} radio wanted={value_s}")
+                continue
+
+            # FILE INPUT — value is a path.
+            if input_type == "file":
+                try:
+                    await locator.set_input_files(value_s)
+                    filled.append(f"{key} [file] = {value_s}")
+                    verified.append(str(key))
+                except Exception as e:
+                    missed.append(f"{key} (file: {type(e).__name__})")
+                continue
+
+            # Default: text-like input.
             try:
                 await locator.fill("")             # clear
                 await locator.fill(value_s)        # fill
@@ -1371,7 +1872,22 @@ class _BrowserSession:
                 actual_display = "(masked)" if secret else str(actual)[:60]
                 mismatched.append(f"{key} wanted={display} got={actual_display}")
 
-        lines = [f"Fill summary: {len(verified)}/{len(fields)} verified."]
+        total = len(fields) - (1 if "_missing" in fields else 0)
+        header = f"Fill summary: {len(verified)}/{total} verified."
+        # Front-load the failure state so the caller (and the model
+        # reading the result back) cannot mistake a zero-fill for
+        # success. The previous output started with "Fill summary: 0/5"
+        # which the model occasionally narrated as "I am filling the
+        # form" — never again: the first token is now FAILED.
+        if total > 0 and len(verified) == 0:
+            header = ("FAILED: " + header
+                      + " No field locator matched; the form was NOT "
+                      "filled. Run action='inspect_form' and retry "
+                      "with the exact field names/ids it reports.")
+        elif mismatched or missed:
+            header = "PARTIAL: " + header
+
+        lines = [header]
         if filled:
             lines.append("Filled & verified: " + "; ".join(filled))
         if mismatched:
@@ -1379,7 +1895,10 @@ class _BrowserSession:
                          + "; ".join(mismatched))
         if missed:
             lines.append("Missed (no locator matched): " + ", ".join(missed))
-        return "\n".join(lines)
+        out = "\n".join(lines)
+        self._last_fill_summary = out
+        self._last_action = "fill_form"
+        return out
 
     async def smart_click(self, description: str) -> str:
         page = await self._get_page()
@@ -1420,8 +1939,20 @@ class _BrowserSession:
                 el = loc.first
                 if await el.count() == 0:
                     continue
-                await el.clear()
-                await el.type(text, delay=50)
+                try:
+                    await el.fill("")
+                    await el.fill(text)
+                except Exception:
+                    await el.click()
+                    await el.type(text, delay=20)
+                # Verify
+                try:
+                    actual = await el.input_value()
+                    if actual == text:
+                        return (f"Typed into ({method}) '{description}' "
+                                f"(verified)")
+                except Exception:
+                    pass
                 return f"Typed into ({method}): '{description}'"
             except Exception:
                 continue
@@ -1493,6 +2024,7 @@ class _BrowserSession:
                 "BrowserContext has been closed — cannot open a new tab.")
         new = await self._context.new_page()
         self._page = new
+        self._owned_page_ids.add(id(new))
         if url:
             return await self.go_to(url)
         return "New tab opened."
@@ -1589,13 +2121,41 @@ class _SessionRegistry:
     def _get_or_create(self, browser_name: str,
                         cdp_port: int | None = None) -> _BrowserSession:
         with self._lock:
-            if browser_name not in self._sessions:
+            cached = self._sessions.get(browser_name)
+            # Evict dead sessions. Previously the cached session was
+            # returned unconditionally — so when the user closed an
+            # automation-owned window and Playwright tore down its
+            # context, every later call returned the SAME dead session
+            # and "BrowserContext has been closed" became permanent.
+            if cached is not None:
+                try:
+                    dead = cached.is_dead()
+                except Exception:
+                    dead = True
+                if dead:
+                    print(f"[Registry] Evicting dead session: {browser_name}")
+                    try:
+                        cached.close()
+                    except Exception:
+                        pass
+                    self._sessions.pop(browser_name, None)
+                    cached = None
+            if cached is None:
                 sess = _BrowserSession(browser_name, cdp_port=cdp_port)
                 sess.start()
                 self._sessions[browser_name] = sess
                 print(f"[Registry] New session: {browser_name}"
                       + (f" (CDP :{cdp_port})" if cdp_port else ""))
             return self._sessions[browser_name]
+
+    def evict(self, browser_name: str) -> None:
+        """Force-drop a session reference (e.g. after a terminal
+        BrowserContext error). Does not call close() — the context is
+        already gone; close() would just raise."""
+        with self._lock:
+            self._sessions.pop(browser_name, None)
+            if self._active_browser == browser_name:
+                self._active_browser = ""
 
     def get(self, browser_name: str | None = None,
              cdp_port: int | None = None) -> _BrowserSession:
@@ -2182,7 +2742,34 @@ def browser_control(
             except concurrent.futures.TimeoutError:
                 result = f"Browser action '{action}' timed out (60s)."
             except Exception as e:
-                result = f"Browser error ({action}): {e}"
+                err_text = str(e)
+                low = err_text.lower()
+                if any(tok in low for tok in (
+                        "browsercontext has been closed",
+                        "target page, context or browser has been closed",
+                        "browser has been closed",
+                        "context has been closed")):
+                    try:
+                        target_name = _ALIASES.get(
+                            (browser or _registry._active_browser
+                             or _detect_default_browser()
+                             ).lower().strip(),
+                            (browser or _registry._active_browser
+                             or _detect_default_browser()
+                             ).lower().strip(),
+                        )
+                        _registry.evict(target_name)
+                        print(f"[Registry] Auto-evicted {target_name} "
+                              f"after dead-context on '{action}'.")
+                    except Exception:
+                        pass
+                    result = (f"Browser session terminated (automation "
+                              f"window likely closed). Cleared dead "
+                              f"reference. Call action='attach' to "
+                              f"reconnect, or retry '{action}' to open "
+                              f"a fresh session. Error: {err_text[:160]}")
+                else:
+                    result = f"Browser error ({action}): {err_text}"
             _log(player, result)
             return result
 
@@ -2213,6 +2800,35 @@ def browser_control(
     if _as_result is not None:
         _log(player, _as_result)
         return _as_result
+
+    # DOM-level verbs require a live Playwright session — AppleScript cannot
+    # run `page.evaluate` or `locator.input_value`. If we don't already have
+    # a session, DO NOT silently launch a fresh Playwright window (that was
+    # the "a new browser opens for inspect" bug). Tell the user how to
+    # attach to their real browser instead.
+    _DOM_ONLY = {"inspect_form", "verify_page", "task_state",
+                 "dismiss_dialogs", "fill_form", "smart_click",
+                 "smart_type", "probe_selector"}
+    if action in _DOM_ONLY and not _registry.has(
+            _ALIASES.get(
+                (browser or _registry._active_browser
+                 or _detect_default_browser()).lower().strip(),
+                (browser or _registry._active_browser
+                 or _detect_default_browser()).lower().strip(),
+            )):
+        target_for_msg = (browser or _registry._active_browser
+                          or _detect_default_browser())
+        result = (
+            f"Cannot run '{action}' — no controllable Playwright session "
+            f"for {target_for_msg} yet. Call action='attach' (if the "
+            f"browser is running with CDP on port {_CDP_DEFAULT_PORT}) or "
+            f"action='start_debug' (relaunches the browser in control "
+            f"mode, keeping your profile and logins). I will not open a "
+            f"separate automation window — that would operate on a tab "
+            f"you cannot see."
+        )
+        _log(player, result)
+        return result
 
     # If the user asked us to "scroll MY browser" and we silently launch a
     # fresh Playwright window, the scroll goes to a window they can't see —
@@ -2297,6 +2913,18 @@ def browser_control(
             result = sess.run(sess.get_text())
         elif action == "get_url":
             result = sess.run(sess.get_url())
+        elif action == "verify_page":
+            result = sess.run(sess.verify_page())
+        elif action == "inspect_form":
+            result = sess.run(sess.inspect_form(
+                params.get("which", "primary")))
+        elif action == "task_state":
+            result = sess.run(sess.task_state())
+        elif action == "dismiss_dialogs":
+            result = sess.run(sess.dismiss_dialogs())
+        elif action == "probe_selector":
+            result = sess.run(sess.probe_selector(
+                params.get("selector", "")))
         elif action == "press":
             result = sess.run(sess.press(params.get("key", "Enter")))
         elif action == "close_tab":
@@ -2315,7 +2943,38 @@ def browser_control(
     except concurrent.futures.TimeoutError:
         result = f"Browser action '{action}' timed out (60s)."
     except Exception as e:
-        result = f"Browser error ({action}): {e}"
+        err_text = str(e)
+        # Dead-context detection — evict the session so the NEXT call
+        # creates a fresh one instead of hitting the same stale
+        # reference forever. The previous code just returned the error
+        # and re-returned it on every retry: "BrowserContext has been
+        # closed" became permanent.
+        low = err_text.lower()
+        if any(tok in low for tok in (
+                "browsercontext has been closed",
+                "target page, context or browser has been closed",
+                "browser has been closed",
+                "context has been closed")):
+            try:
+                target_name = _ALIASES.get(
+                    (browser or _registry._active_browser
+                     or _detect_default_browser()).lower().strip(),
+                    (browser or _registry._active_browser
+                     or _detect_default_browser()).lower().strip(),
+                )
+                _registry.evict(target_name)
+                print(f"[Registry] Auto-evicted {target_name} after "
+                      f"dead-context error on '{action}'.")
+            except Exception:
+                pass
+            result = (f"Browser session was terminated (likely the "
+                      f"automation window was closed). I have cleared "
+                      f"the dead reference. Call action='attach' to "
+                      f"reconnect to your running browser, or re-run "
+                      f"'{action}' to open a fresh session. Underlying "
+                      f"error: {err_text[:160]}")
+        else:
+            result = f"Browser error ({action}): {err_text}"
 
     _log(player, result)
     return result
@@ -2337,7 +2996,7 @@ TOOL = {
         "properties": {
             "action": {
                 "type": "STRING",
-                "description": "go_to | search | click | coord_click | hover | type | scroll | fill_form | smart_click | smart_type | get_text | get_url | get_state | press | new_tab | close_tab | reopen_tab | next_tab | prev_tab | list_tabs | switch_tab | screenshot | back | forward | reload | keystroke | shortcut | focus_address | find | find_close | enable_js | set_pref | get_prefs | clear_prefs | trust_site | untrust_site | list_trusted_sites | attach | attach_help | start_debug | switch | list_browsers | close | close_all | trust_me"
+                "description": "go_to | search | click | coord_click | hover | type | scroll | fill_form | smart_click | smart_type | get_text | get_url | get_state | verify_page | inspect_form | task_state | dismiss_dialogs | probe_selector | press | new_tab | close_tab | reopen_tab | next_tab | prev_tab | list_tabs | switch_tab | screenshot | back | forward | reload | keystroke | shortcut | focus_address | find | find_close | enable_js | set_pref | get_prefs | clear_prefs | trust_site | untrust_site | list_trusted_sites | attach | attach_help | start_debug | switch | list_browsers | close | close_all | trust_me"
             },
             "browser": {
                 "type": "STRING",
@@ -2422,6 +3081,15 @@ TOOL = {
             "host": {
                 "type": "STRING",
                 "description": "Hostname for trust_site / untrust_site, e.g. 'rootdevs.com' or '*.example.com'. Omit to use the current active tab's host."
+            },
+            "which": {
+                "type": "STRING",
+                "description": "For inspect_form: 'primary' (first form) or a substring of a form's name/id to pick a specific one on a multi-form page."
+            },
+            "fields": {
+                "type": "OBJECT",
+                "description": "For fill_form: a dict of {field_label_or_key: value}. Values are fed to each detected input; a readback verifies them.",
+                "properties": {}
             }
         },
         "required": [
