@@ -210,6 +210,69 @@ Jarvis, record a prediction: project X ships Nov 25, confidence 60 percent.
 Jarvis, forecast: what if traffic doubles and capacity is a thousand RPS?
 ```
 
+## Profile-driven form filling and site credentials
+
+Two additions turn `browser_control` into a genuine form agent:
+
+### `memory/user_profile.py`
+
+A typed, flat JSON store at `memory/user_profile.json` with canonical
+fields (first_name, last_name, email, phone, address_line1, …), synonyms
+for label matching, and a `missing(required)` helper. `form_fill` uses it
+to know *what information exists*, so the assistant asks for a specific
+missing value instead of refusing the whole task.
+
+```python
+from memory import user_profile
+user_profile.set("first_name", "Ada")
+user_profile.set("email", "ada@example.com")
+user_profile.missing(["first_name", "last_name", "email"])
+# → ['last_name']
+```
+
+### `actions/form_fill.py` (Gemini tool)
+
+```
+form_fill(kind="registration", url="https://example.test/signup",
+          submit_after=True, submit_label="Create account")
+```
+
+Flow: navigate → match the profile fields against the detected form →
+delegate to `browser_control.fill_form` → gate the submit through
+`core/approval.py` (LVL2 `form_submit` category).
+
+Supported kinds: `registration | application | contact | profile | login |
+generic`. Default required sets are conservative; pass `required_extra`
+to tighten per-site.
+
+### `actions/credential.py` (Gemini tool)
+
+Site credentials live in the OS keyring with an AES-encrypted disk
+fallback (`config/site_creds.enc`). The password is never returned in a
+tool result or chat transcript — only a success / failure line plus a
+scrubbed summary of the fill and click.
+
+```
+credential(action="save",  host="github.com",
+           username="me@example.com", password="…")
+credential(action="login", host="github.com")         # LVL2 gated
+credential(action="list_hosts")
+credential(action="forget", host="github.com")
+```
+
+MFA / CAPTCHA flows always hand control back to the user.
+
+## Prompt-level refusal fix
+
+`core/prompt.txt` now includes an explicit anti-refusal clause inside
+the `[BROWSER_AGENT]` section: *signing in to the user's own account,
+filling a registration or application form with information the user has
+given, submitting a form after the user has reviewed it* are things this
+build is designed to do, and the correct response is to open the page
+and act — NOT "I cannot do that on your behalf". When a required piece
+of profile data is genuinely missing, the assistant asks for *that
+specific value* rather than refusing the whole task.
+
 ### Limitations and non-goals
 
 - CAPTCHAs, MFA codes, identity challenges: **always** handed back to the
