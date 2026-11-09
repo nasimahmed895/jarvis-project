@@ -273,6 +273,65 @@ and act — NOT "I cannot do that on your behalf". When a required piece
 of profile data is genuinely missing, the assistant asks for *that
 specific value* rather than refusing the whole task.
 
+## Browser automation fixes (session 4)
+
+Targeted fixes to the real bugs surfaced in the conversation logs. The
+2170-line `actions/browser_control.py` is otherwise unchanged; only the
+specific unsafe paths were edited.
+
+### Root causes addressed
+
+| Symptom (from logs) | Root cause | Fix |
+|---|---|---|
+| `BrowserContext.new_page: Target page, context or browser has been closed` | 3 unguarded calls to `self._context.new_page()` | New `_ctx_alive()` helper. `_get_page`, `_adopt_page`, `go_to`, `new_tab` now check it and raise a clear error instead of crashing. |
+| Lost active page after clicking | `close_tab` assigned `pages[-1]` even when that page was closed; `switch_tab` adopted a target that could close between filter and assignment | New `_first_live_page()` helper. `close_tab` / `switch_tab` always leave `self._page` on a live sibling or None. |
+| "Fill succeeded" when nothing was filled | `fill_form` typed, never read values back | `fill_form` now reads `locator.input_value()` and reports `N/M verified` with every value that failed to round-trip. |
+| Only matched exact English labels ("Sign Up") | `click` used `get_by_text(text, exact=False)` only | `click` now tries `get_by_role` first (button/link/menuitem/tab/checkbox/radio), then label / placeholder / exact-text / substring-text / aria-attrs. Synonyms from `core/synonyms.py` expand intent keywords to English + Bengali surface forms. |
+| Passwords echoed in fill summaries | No scrubbing | Keys containing `password/secret/pin/otp/token/cvv/cvc/card` and inputs with `type=password` emit `(masked)` in all logged / returned strings. |
+
+### `core/synonyms.py`
+
+Intent → surface forms for form-level vocabulary. Covers English and
+Bengali for: register, login, logout, submit, next, cancel, search,
+full_name, first_name, last_name, email, phone, password,
+confirm_password, shop_name, address, city, state, postal_code, country,
+date_of_birth, gender, username, otp.
+
+```python
+from core import synonyms
+synonyms.expand("register")
+# → ['Register', 'Sign Up', 'Create Account', …, 'নিবন্ধন', 'একাউন্ট তৈরি করুন', …]
+synonyms.intent_for("Please enter your mobile number")   # → 'phone'
+synonyms.intent_for("ইমেইল ঠিকানা")                        # → 'email'
+```
+
+### Click strategy order
+
+1. `get_by_role` (button, link, menuitem, tab, checkbox, radio)
+2. `get_by_label`
+3. `get_by_placeholder`
+4. `get_by_text(exact=True)`
+5. `get_by_text(exact=False)`
+6. CSS attribute match (`aria-label`, `title`, `alt`)
+
+Applied once with the raw `text`, then re-applied with each synonym.
+Return value names the strategy that matched so the assistant knows
+what worked, e.g. `Clicked by role=button name='Sign Up' (expanded
+from 'register')`.
+
+### Fill verification contract
+
+Every `fill_form(fields)` return now has the shape:
+
+```
+Fill summary: 3/4 verified.
+Filled & verified: email→Email [role=textbox] = ada@example.com; full_name→Full Name [role=textbox] = Ada L; password→password [role=textbox] = (masked)
+Mismatch (value did not round-trip): phone wanted=+100... got=(empty)
+```
+
+The model is instructed never to claim success unless the summary shows
+`N/N verified` AND the mismatch section is empty.
+
 ### Limitations and non-goals
 
 - CAPTCHAs, MFA codes, identity challenges: **always** handed back to the

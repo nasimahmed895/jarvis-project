@@ -879,6 +879,49 @@ class _BrowserSession:
                 pass
         self._context = self._page = None
 
+    def _ctx_alive(self) -> bool:
+        """True when the context is usable for a new page. Safeguards every
+        `self._context.new_page()` call — the API throws
+        'BrowserContext.new_page: Target page, context or browser has been
+        closed' otherwise."""
+        ctx = self._context
+        if ctx is None:
+            return False
+        # Playwright exposes `is_closed()` on BrowserContext in recent
+        # versions; older ones don't. Be defensive.
+        is_closed = getattr(ctx, "is_closed", None)
+        if callable(is_closed):
+            try:
+                if is_closed():
+                    return False
+            except Exception:
+                return False
+        browser = getattr(ctx, "browser", None)
+        if browser is not None:
+            is_connected = getattr(browser, "is_connected", None)
+            if callable(is_connected):
+                try:
+                    if not is_connected():
+                        return False
+                except Exception:
+                    return False
+        return True
+
+    def _first_live_page(self) -> Page | None:
+        """First non-closed page in the context. Used by tab ops so we
+        never leave `self._page` pointing at a page that has already been
+        closed externally (a Chrome tab close, a site self-navigating
+        window.close, …)."""
+        if self._context is None:
+            return None
+        try:
+            for p in self._context.pages:
+                if not p.is_closed():
+                    return p
+        except Exception:
+            pass
+        return None
+
     async def _adopt_page(self) -> Page:
         """
         launch_persistent_context already opens a starting tab.
@@ -886,8 +929,12 @@ class _BrowserSession:
         so the user never sees an extra blank tab.
         """
         await asyncio.sleep(0.3)
-        pages = self._context.pages
-        return pages[0] if pages else await self._context.new_page()
+        live = self._first_live_page()
+        if live is not None:
+            return live
+        if not self._ctx_alive():
+            raise RuntimeError("Browser context closed — cannot adopt a page.")
+        return await self._context.new_page()
 
     async def _launch(self):
         """
@@ -1019,10 +1066,22 @@ class _BrowserSession:
 
     async def _get_page(self) -> Page:
         await self._launch()
-        # If somehow page got closed, open a fresh one
+        # If the previous active page was closed externally (user closed
+        # the tab, site called window.close, context was swapped) try to
+        # pick up an existing live sibling first — creating a blank new
+        # page would both lose the user's workflow and crash when the
+        # context has itself been closed.
         if self._page is None or self._page.is_closed():
-            self._page = await self._context.new_page()
-            await asyncio.sleep(0.2)
+            live = self._first_live_page()
+            if live is not None:
+                self._page = live
+            elif self._ctx_alive():
+                self._page = await self._context.new_page()
+                await asyncio.sleep(0.2)
+            else:
+                raise RuntimeError(
+                    "BrowserContext has been closed — cannot continue. "
+                    "Call action='switch' or 'attach' to re-establish.")
         return self._page
 
     async def go_to(self, url: str) -> str:
@@ -1047,9 +1106,12 @@ class _BrowserSession:
         if result_url in ("about:blank", "", None, prev_url) and prev_url in ("about:blank", "", None):
             print(f"[Browser] Still blank after goto — retrying on new tab: {url}")
             try:
-                new_page   = await self._context.new_page()
-                self._page = new_page
-                result_url = await _do_goto(new_page)
+                if not self._ctx_alive():
+                    print("[Browser] Skipping new-tab retry — context closed.")
+                else:
+                    new_page   = await self._context.new_page()
+                    self._page = new_page
+                    result_url = await _do_goto(new_page)
             except Exception as e:
                 print(f"[Browser] New-tab retry failed: {e}")
 
@@ -1062,19 +1124,88 @@ class _BrowserSession:
         return await self.go_to(base + query.replace(" ", "+"))
 
     async def click(self, selector: str = None, text: str = None) -> str:
+        """Click something. Tries (in order) ARIA role+name, label,
+        placeholder, exact text, substring text, aria-label/title/alt
+        attributes. If `text` looks like an intent keyword (register,
+        login, submit, …) it is first expanded through core/synonyms so
+        the same call works on an English or Bengali site.
+
+        Returns a short string naming the strategy that matched, so the
+        model can tell "clicked by role=button name='Sign Up'" apart
+        from "clicked by substring text 'register'".
+        """
         page = await self._get_page()
-        try:
-            if text:
-                await page.get_by_text(text, exact=False).first.click(timeout=8_000)
-                return f"Clicked text: '{text}'"
-            if selector:
+
+        if selector and not text:
+            try:
                 await page.click(selector, timeout=8_000)
                 return f"Clicked selector: {selector}"
+            except PlaywrightTimeout:
+                return f"Selector not found (timeout): {selector}"
+            except Exception as e:
+                return f"Click error on '{selector}': {e}"
+
+        if not text:
             return "No selector or text provided."
-        except PlaywrightTimeout:
-            return "Element not found (timeout)."
-        except Exception as e:
-            return f"Click error: {e}"
+
+        # Candidate labels: original + synonym expansion if the caller
+        # handed us an intent keyword. Users / the model type "sign up"
+        # as an intent interchangeably with the literal button text, so
+        # we try both paths.
+        from core import synonyms as _syn
+        candidates: list[str] = [text]
+        expanded = _syn.expand(text)
+        for e in expanded:
+            if e not in candidates:
+                candidates.append(e)
+
+        last_err = ""
+        for label in candidates:
+            for role in ("button", "link", "menuitem", "tab",
+                         "checkbox", "radio"):
+                try:
+                    loc = page.get_by_role(role, name=label, exact=False)
+                    if await loc.count() > 0:
+                        await loc.first.click(timeout=4_000)
+                        return (f"Clicked by role={role} name='{label}'"
+                                + (f" (expanded from '{text}')"
+                                   if label != text else ""))
+                except Exception as e:
+                    last_err = str(e)[:120]
+            # label / placeholder / substring text / aria-label etc.
+            for strategy, cb in (
+                ("label",
+                 lambda l=label: page.get_by_label(l, exact=False).first
+                 .click(timeout=4_000)),
+                ("placeholder",
+                 lambda l=label: page.get_by_placeholder(l, exact=False).first
+                 .click(timeout=4_000)),
+                ("text(exact)",
+                 lambda l=label: page.get_by_text(l, exact=True).first
+                 .click(timeout=4_000)),
+                ("text(substr)",
+                 lambda l=label: page.get_by_text(l, exact=False).first
+                 .click(timeout=4_000)),
+                ("aria-attrs",
+                 lambda l=label: page.locator(
+                     f'[aria-label*="{l}" i],[title*="{l}" i],'
+                     f'[alt*="{l}" i]').first.click(timeout=4_000)),
+            ):
+                try:
+                    await cb()
+                    return (f"Clicked by {strategy} '{label}'"
+                            + (f" (expanded from '{text}')"
+                               if label != text else ""))
+                except PlaywrightTimeout:
+                    continue
+                except Exception as e:
+                    last_err = str(e)[:120]
+                    continue
+
+        return (f"Element not found for '{text}'. Tried {len(candidates)} "
+                f"synonym(s) across role/label/placeholder/text/aria. "
+                f"Last error: {last_err}" if last_err else
+                f"Element not found for '{text}'.")
 
     async def type_text(self, selector: str = None, text: str = "",
                         clear_first: bool = True) -> str:
@@ -1118,17 +1249,137 @@ class _BrowserSession:
         return page.url
 
     async def fill_form(self, fields: dict) -> str:
-        page    = await self._get_page()
-        results = []
-        for selector, value in fields.items():
+        """Fill a form and VERIFY each field by reading its value back.
+
+        For each `(key, value)`:
+          1. Try to locate the input via role=textbox, get_by_label,
+             get_by_placeholder, `[name="key"]`, `[id="key"]`, raw CSS
+             selector (so callers can still pass a precise selector).
+             Synonym expansion lets "email" also match বাংলা labels.
+          2. clear() then fill() — `fill` is the correct Playwright verb
+             for `<input>` values; `type` has to simulate keystrokes and
+             is slower and less reliable on some React inputs.
+          3. Read `locator.input_value()` and compare to the intended
+             value. A field whose value does not round-trip is reported
+             as 'filled but not verified' with the observed value.
+
+        Password-shaped fields (type=password OR key containing
+        "password" / "secret" / "pin" / "otp") are never echoed in the
+        return value — only "(masked)" appears.
+        """
+        page = await self._get_page()
+        from core import synonyms as _syn
+
+        async def _resolve_locator(key: str):
+            """Return the first live locator matching `key`, trying
+            role / label / placeholder / name / id / raw CSS, plus a
+            second pass through synonyms."""
+            candidates: list[str] = [key]
+            exp = _syn.expand(key)
+            for e in exp:
+                if e not in candidates:
+                    candidates.append(e)
+
+            for label in candidates:
+                for strategy, build in (
+                    ("role=textbox",
+                     lambda l=label: page.get_by_role("textbox", name=l)),
+                    ("label",
+                     lambda l=label: page.get_by_label(l, exact=False)),
+                    ("placeholder",
+                     lambda l=label: page.get_by_placeholder(l, exact=False)),
+                ):
+                    try:
+                        loc = build().first
+                        if await loc.count() > 0:
+                            return loc, strategy, label
+                    except Exception:
+                        continue
+
+            # Attribute / CSS fallbacks using the original key only — these
+            # are selector-space, not label-space, so synonyms don't apply.
+            for strategy, sel in (
+                ("[name]", f'[name="{key}"]'),
+                ("[id]",   f'#{key}' if key.replace("_", "").isalnum()
+                           else f'[id="{key}"]'),
+                ("css",    key),
+            ):
+                try:
+                    loc = page.locator(sel).first
+                    if await loc.count() > 0:
+                        return loc, strategy, key
+                except Exception:
+                    continue
+            return None, None, None
+
+        def _is_secret(key: str) -> bool:
+            k = (key or "").lower()
+            return any(tok in k for tok in
+                       ("password", "pass_", "secret", "otp", "pin",
+                        "token", "cvv", "cvc", "card"))
+
+        async def _is_password_input(locator) -> bool:
             try:
-                el = page.locator(selector).first
-                await el.clear()
-                await el.type(str(value), delay=40)
-                results.append(f"✓ {selector}")
-            except Exception as e:
-                results.append(f"✗ {selector}: {e}")
-        return "Form filled: " + ", ".join(results)
+                t = (await locator.get_attribute("type") or "").lower()
+                return t == "password"
+            except Exception:
+                return False
+
+        filled: list[str] = []
+        verified: list[str] = []
+        missed: list[str] = []
+        mismatched: list[str] = []
+
+        for key, value in fields.items():
+            if key == "_missing":
+                continue  # convention used by actions/form_fill.py
+            value_s = str(value)
+            locator, strategy, matched_label = await _resolve_locator(str(key))
+            if locator is None:
+                missed.append(str(key))
+                continue
+            try:
+                await locator.wait_for(state="visible", timeout=4_000)
+            except Exception:
+                pass
+            try:
+                await locator.fill("")             # clear
+                await locator.fill(value_s)        # fill
+            except Exception:
+                # Fall back to type() for custom-widget inputs.
+                try:
+                    await locator.click()
+                    await locator.type(value_s, delay=20)
+                except Exception as e:
+                    missed.append(f"{key} ({type(e).__name__})")
+                    continue
+
+            secret = _is_secret(str(key)) or await _is_password_input(locator)
+            try:
+                actual = await locator.input_value()
+            except Exception:
+                actual = None
+
+            display = "(masked)" if secret else value_s
+            if actual == value_s:
+                filled.append(f"{key}→{matched_label} [{strategy}] = {display}")
+                verified.append(str(key))
+            elif actual is None:
+                filled.append(f"{key} [{strategy}] = {display} "
+                              "(no readback)")
+            else:
+                actual_display = "(masked)" if secret else str(actual)[:60]
+                mismatched.append(f"{key} wanted={display} got={actual_display}")
+
+        lines = [f"Fill summary: {len(verified)}/{len(fields)} verified."]
+        if filled:
+            lines.append("Filled & verified: " + "; ".join(filled))
+        if mismatched:
+            lines.append("Mismatch (value did not round-trip): "
+                         + "; ".join(mismatched))
+        if missed:
+            lines.append("Missed (no locator matched): " + ", ".join(missed))
+        return "\n".join(lines)
 
     async def smart_click(self, description: str) -> str:
         page = await self._get_page()
@@ -1219,6 +1470,11 @@ class _BrowserSession:
                 return f"No tab matches: '{title_contains}'"
         else:
             return "Specify index or title_contains."
+        # Confirm target is still live before adopting it; a tab the user
+        # closed between `list` and `switch` would otherwise poison self._page.
+        if target.is_closed():
+            self._page = self._first_live_page()
+            return "Chosen tab was closed; adopted the next live one."
         self._page = target
         try:
             await target.bring_to_front()
@@ -1231,9 +1487,11 @@ class _BrowserSession:
         return f"Switched to tab: {title[:60]}"
 
     async def new_tab(self, url: str = "") -> str:
-        page = await self._get_page()
-        ctx  = page.context
-        new  = await ctx.new_page()
+        await self._launch()
+        if not self._ctx_alive():
+            raise RuntimeError(
+                "BrowserContext has been closed — cannot open a new tab.")
+        new = await self._context.new_page()
         self._page = new
         if url:
             return await self.go_to(url)
@@ -1242,12 +1500,16 @@ class _BrowserSession:
     async def close_tab(self) -> str:
         page = self._page
         if page and not page.is_closed():
-            ctx   = page.context
             await page.close()
-            pages = ctx.pages
-            self._page = pages[-1] if pages else None
+            # Pick the next live sibling. Prior code took `pages[-1]`
+            # unconditionally and happily assigned a closed Page back to
+            # self._page when the just-closed tab was the last one.
+            self._page = self._first_live_page()
             return "Tab closed."
-        return "No active tab to close."
+        # Even when _page was stale, we may still have live siblings.
+        self._page = self._first_live_page()
+        return "No active tab to close." if self._page is None \
+               else "Cleaned stale page reference; active tab recovered."
 
     async def screenshot(self, path: str = None) -> str:
         page = await self._get_page()
