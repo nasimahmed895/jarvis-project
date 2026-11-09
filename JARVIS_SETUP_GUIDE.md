@@ -133,6 +133,83 @@ step list. `/api/data/browser/stop` (POST) cancels all running
 browser-touching tasks — running steps complete; the worker stops
 dispatching further ones.
 
+## Predictive intelligence
+
+The predictive stack sits on top of the project's long-running stores
+(tasks, schedules, journal) and adds a ledger that *scores itself* over
+time. Design priorities: evidence-based, explainable, calibrated.
+
+### Layout
+
+| Module | Role |
+|---|---|
+| `core/predictor.py` | Distils recurring-slot patterns from the journal. Heuristic (median + spread + support ≥3). Returns suggestions. |
+| `core/predictions.py` | Ledger. `record()` on prediction, `resolve()` on outcome. SQLite at `memory/predictions.sqlite`. Computes MAE / RMSE / MAPE / Brier + calibration buckets. |
+| `core/risk.py` | Aggregates explainable risk items from tasks / schedules / prediction accuracy. Rule-based with full evidence; every rule can be inspected and replaced. |
+| `core/scenarios.py` | Pure what-if arithmetic: `percent_change`, `shift_deadline`, `delay_task`, `demand_change`, `traffic_surge`. Returns `{expected, optimistic, pessimistic, assumptions}`. |
+| `actions/forecast.py` | Gemini tool exposing `suggest / risks / scenario / record / resolve / metrics / list`. |
+
+### Flow
+
+```
++----------------+  record()   +-----------------+
+| model forecast | ----------> | predictions.sq  |
++----------------+             +-----------------+
+         |                              ^
+         | outcome known                |  resolve(id, actual)
+         v                              |
++----------------+                      |
+|  user / event  |----------------------+
++----------------+
+```
+
+The assistant is encouraged (via `actions/forecast.py` description) to
+call `record` whenever it produces a forecast and `resolve` when an
+outcome lands. The ledger then exposes real calibration through
+`metrics()`.
+
+### Confidence policy
+
+The model's self-reported confidence is stored but never promoted to
+"accuracy". Calibration metrics (Brier, reliability buckets) are the
+honest signal. The dashboard displays the ledger's observed mean actual
+per predicted-probability bucket — if the assistant systematically says
+"80% confident" but is right only 55% of the time, the operator sees it.
+
+### Risk rules
+
+Shipped rules:
+
+- **overdue_tasks** — running tasks without updates for > 24h (medium) / 72h (high).
+- **awaiting_user** — tasks waiting on the HUD banner for > 6h.
+- **schedule_conflicts** — two scheduled items firing within 2 min.
+- **failed_predictions** — a prediction category with MAPE > 50% over ≥5 resolved samples.
+
+Custom rules register via `core.risk.register_rule(fn)`. A rule that
+raises is caught and surfaced as a `low`-severity infra risk — a broken
+rule does not sink the report.
+
+### Dashboard endpoints
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET`   | `/api/data/predictions` | ledger + metrics, filterable by category/status |
+| `POST`  | `/api/data/predictions/resolve` | record outcome `{id, actual \| actual_label}` |
+| `GET`   | `/api/data/risks` | current risk register |
+| `POST`  | `/api/data/scenarios` | compute what-if `{shape, …inputs}` |
+| `POST`  | `/api/data/memory` | upsert `{category, key, value}` |
+| `DELETE` | `/api/data/memory` | delete `{category, key}` |
+
+### Example voice commands
+
+```
+Jarvis, what are my risks right now?
+Jarvis, if I delay the launch by three days, what's the knock-on?
+Jarvis, what did my last ten spend forecasts actually turn into?
+Jarvis, record a prediction: project X ships Nov 25, confidence 60 percent.
+Jarvis, forecast: what if traffic doubles and capacity is a thousand RPS?
+```
+
 ### Limitations and non-goals
 
 - CAPTCHAs, MFA codes, identity challenges: **always** handed back to the

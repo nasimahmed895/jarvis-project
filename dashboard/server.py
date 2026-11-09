@@ -1243,6 +1243,166 @@ class DashboardServer:
             except Exception as e:
                 return JSONResponse({"ok": True, "items": [], "error": str(e)})
 
+        # ── Memory edit/delete (user control) ─────────────────────────────
+        # The HUD exposes read-only `/api/data/memory`; the dashboard needs
+        # to let the user correct or forget entries. `update_memory` already
+        # merges+dedupes; a POST with `{category, key, value}` updates,
+        # DELETE removes.
+
+        @app.post("/api/data/memory")
+        async def data_memory_upsert(req: Request):
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            try:
+                body = await req.json()
+            except Exception as e:
+                return JSONResponse({"ok": False,
+                                     "error": f"bad JSON: {e}"},
+                                    status_code=400)
+            category = (body.get("category") or "").strip()
+            key = (body.get("key") or "").strip()
+            value = body.get("value")
+            if not category or not key or value is None:
+                return JSONResponse(
+                    {"ok": False,
+                     "error": "require category, key, value"},
+                    status_code=400)
+            try:
+                from memory import memory_manager as _m
+                _m.update_memory({category: {key: {"value": value}}})
+                return JSONResponse({"ok": True})
+            except Exception as e:
+                return JSONResponse({"ok": False, "error": str(e)},
+                                    status_code=500)
+
+        @app.delete("/api/data/memory")
+        async def data_memory_delete(req: Request):
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            try:
+                body = await req.json()
+            except Exception:
+                body = {}
+            category = (body.get("category") or "").strip()
+            key = (body.get("key") or "").strip()
+            if not category or not key:
+                return JSONResponse(
+                    {"ok": False, "error": "require category, key"},
+                    status_code=400)
+            try:
+                from memory import memory_manager as _m
+                mem = _m.load_memory() or {}
+                cat = mem.get(category) or {}
+                if key in cat:
+                    cat.pop(key, None)
+                    mem[category] = cat
+                    _m.save_memory(mem)
+                return JSONResponse({"ok": True})
+            except Exception as e:
+                return JSONResponse({"ok": False, "error": str(e)},
+                                    status_code=500)
+
+        # ── Predictions / risk / scenarios ────────────────────────────────
+
+        @app.get("/api/data/predictions")
+        async def data_predictions(req: Request,
+                                   category: str | None = None,
+                                   status: str | None = None,
+                                   limit: int = 50):
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            try:
+                from core import predictions as _p
+                _p.connect(_MEM_DIR / "predictions.sqlite")
+                rows = _p.list_predictions(category=category, status=status,
+                                           limit=max(1, min(int(limit), 500)))
+                return JSONResponse({
+                    "ok":      True,
+                    "items":   [r.to_dict() for r in rows],
+                    "metrics": _p.metrics(category=category),
+                })
+            except Exception as e:
+                return JSONResponse({"ok": True, "items": [], "error": str(e)})
+
+        @app.post("/api/data/predictions/resolve")
+        async def data_predictions_resolve(req: Request):
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            try:
+                body = await req.json()
+            except Exception as e:
+                return JSONResponse({"ok": False,
+                                     "error": f"bad JSON: {e}"},
+                                    status_code=400)
+            try:
+                from core import predictions as _p
+                _p.connect(_MEM_DIR / "predictions.sqlite")
+                err = _p.resolve(
+                    int(body["id"]),
+                    actual=body.get("actual"),
+                    actual_label=body.get("actual_label"))
+                return JSONResponse({"ok": True, "error_metric": err})
+            except Exception as e:
+                return JSONResponse({"ok": False, "error": str(e)},
+                                    status_code=500)
+
+        @app.get("/api/data/risks")
+        async def data_risks(req: Request):
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            try:
+                from core import risk as _risk
+                return JSONResponse({
+                    "ok":    True,
+                    "items": [r.to_dict() for r in _risk.evaluate()],
+                })
+            except Exception as e:
+                return JSONResponse({"ok": True, "items": [], "error": str(e)})
+
+        @app.post("/api/data/scenarios")
+        async def data_scenarios(req: Request):
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            try:
+                body = await req.json()
+            except Exception as e:
+                return JSONResponse({"ok": False,
+                                     "error": f"bad JSON: {e}"},
+                                    status_code=400)
+            try:
+                from core import scenarios as _sc
+                shape = (body.get("shape") or "").lower().strip()
+                if shape == "percent_change":
+                    return JSONResponse({"ok": True,
+                        "result": _sc.percent_change(
+                            baseline=float(body["baseline"]),
+                            pct=float(body["pct"]),
+                            uncertainty=float(body.get("uncertainty", 0.2))
+                        ).to_dict()})
+                if shape == "delay_task":
+                    return JSONResponse({"ok": True,
+                        "result": _sc.delay_task(
+                            remaining_hours=float(body["remaining_hours"]),
+                            additional_hours=float(body["additional_hours"]),
+                            velocity_hours_per_day=float(
+                                body.get("velocity_hours_per_day", 6)),
+                            uncertainty=float(body.get("uncertainty", 0.25)),
+                        )})
+                if shape == "traffic_surge":
+                    return JSONResponse({"ok": True,
+                        "result": _sc.traffic_surge(
+                            current_rps=float(body["current_rps"]),
+                            multiplier=float(body["multiplier"]),
+                            capacity_rps=float(body["capacity_rps"]),
+                            uncertainty=float(body.get("uncertainty", 0.2)),
+                        )})
+                return JSONResponse({"ok": False,
+                                     "error": f"unknown shape: {shape}"},
+                                    status_code=400)
+            except Exception as e:
+                return JSONResponse({"ok": False, "error": str(e)},
+                                    status_code=500)
+
         @app.get("/api/data/contacts")
         async def data_contacts(req: Request):
             if not _auth(req):
