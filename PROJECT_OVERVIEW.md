@@ -41,6 +41,49 @@ This report is _platform-agnostic_: it does not compare or recommend any specifi
 
 ---
 
+## Implementation Status
+
+_Last audited: 2026-11-18. Status derived from codebase scan of `core/`, `actions/`, `market/`, `memory/`._
+
+| # | Domain | Status | Implemented | Missing |
+|---|--------|--------|-------------|---------|
+| 1 | Activation & Conversational UX | **Partial** | Wake-word (PicoVoice), push-to-talk hotkey, echo cancellation, turn-taking via streaming ASR, silence/timeout handling, session continuity, verbosity control | Visual/gesture activation, whisper mode, full-duplex/barge-in, language switching mid-conversation |
+| 2 | Audio Capture & Processing | **Partial** | Streaming ASR (Gemini Live), VAD/endpointing, audio device enumeration & selection, ASR confidence scoring, echo cancellation, beamforming-ready mic management | Sound/event recognition (doorbells, alarms), multi-party audio recording/summarization, speaker diarization |
+| 3 | Speech Output | **Partial** | Multi-voice TTS, rate/pitch/volume control, lip-sync viseme mapping, platform-native TTS fallback, alert chimes | Spatial/3D audio, voice cloning, SSML markup support, voice authentication watermarking |
+| 4 | Language Understanding & Reasoning | **Complete** | Intent routing (auto-discovered TOOL catalogue), multi-turn dialogue with context buffer, planning (goal→steps, max 24), ambiguity handling via LLM, tool execution, semantic vector search (RAG-style), policy/refusal via approval gates | — |
+| 5 | General Knowledge & Q&A | **Complete** | Web search, fact lookup, math/unit conversions, weather, news, language translation, reading comprehension (LLM), document Q&A, fact grounding (`grounded.py`) | — |
+| 6 | Personal Productivity | **Complete** | Reminders/alarms/timers, calendar management (macOS), todo/task lists, notes/shopping lists, email drafting, meeting prep, morning briefing, habit tracking, productivity reporting, project/milestone tracking, travel itinerary | — |
+| 7 | Communications & Collaboration | **Partial** | Phone calls (macOS bridge), email (send/read/draft), SMS/messaging, contact lookup, social media posting | Voicemail transcription, video-conferencing voice control, intercom/announcement broadcast, spam/consent controls |
+| 8 | Desktop/OS & Device Control | **Partial** | App launch (cross-platform), file CRUD + bulk ops + deduplication, file monitoring, screen capture & OCR, sandboxed shell execution, clipboard/typing dictation, system status queries, global hotkey | Peripheral management (printer control), remote desktop control, voice-driven pointer/GUI control |
+| 9 | Web & Digital Services | **Complete** | Web search & browsing, form auto-fill, multi-step browser workflows, flight/hotel booking, payment processing, webhook ingestion (IFTTT/Zapier), AI-powered site interaction, OAuth credential management | — |
+| 10 | Smart Home & IoT | **Missing** | — | Lighting, HVAC/thermostats, smart locks/doors/garage, cameras/sensors/alarms, appliances, scenes/routines, presence/geofencing, room/group control, local vs cloud, safety interlocks — **entire domain unimplemented** |
+| 11 | Media & Entertainment | **Partial** | Video playback control, YouTube search/play | Music streaming (Spotify/Apple Music), radio/podcasts, multi-room audio, playlist management, captions, parental controls, content recommendations |
+| 12 | Creative/Educational/Professional | **Partial** | Code assist (`code_helper.py`), deep research (`research.py`), writing/editing via LLM, brainstorming, language translation | Image/audio/video editing by voice, presentation creation, interactive tutoring/quizzing system, language practice drills |
+| 13 | Health, Wellbeing & Accessibility | **Partial** | Morning wellness briefing, general wellness via LLM (with disclaimers), screen-reader compatible TTS | Medication reminders, symptom journaling, fall/distress detection, clinician handoff, caregiver workflows, crisis/check-in protocols, nutrition tracking |
+| 14 | Commerce & Finance | **Partial** | Expense/budget tracking, payment processing, bill/subscription management, currency conversion, market research | Product discovery/price comparison, order status & returns, banking read-only integration, fraud alerts, elder-fraud regulatory controls |
+| 15 | Travel, Mobility & Automotive | **Partial** | Flight search (`flight_finder.py`), travel logistics (`travel.py`), timezone conversion | GPS/navigation integration, ride booking (Uber), in-car infotainment control, vehicle diagnostics, driver monitoring, EV charging finder |
+| 16 | Enterprise/Contact Center | **Partial** | Local CRM (`crm.py`), executive gatekeeper/triage (`gatekeeper.py`), knowledge base queries via LLM | ERP/HRIS integration, IVR/call-routing, agent assist, call transcription & summarization, procurement approval workflows, dispatch |
+| 17 | Multimodal & Sensor Fusion | **Partial** | Image OCR & analysis (`vision_analyze.py`), screen capture & context (`screen_processor.py`), location/GPS sensor use | Gesture/body-pose recognition, gaze tracking, object/person recognition, scene description for accessibility, cross-modal grounding |
+| 18 | Proactive/Ambient/Agentic | **Partial** | Cron/interval/one-shot scheduler, event-triggered suggestions (`proactive.py`), long-running background tasks, approval gates before critical actions, undo stack | Goal decomposition over days, delegation to external sub-agents, rollback with full audit log |
+| 19 | Developer Ecosystem & Integration | **Complete** | MCP (Model Context Protocol) server launcher, plugin hot-registration, webhook ingestion, multiple LLM backends (Ollama/OpenAI/Anthropic/Groq/Gemini), action auto-discovery, structured logging, 100+ test suite, sandbox Python exec | — |
+| 20 | Identity, Personalization & Memory | **Partial** | User profile (`user_profile.py`), persistent preferences, semantic long-term memory, episodic journal, vector search recall, session save/restore | Multi-user/guest modes, household vs work profile separation, child safety/COPPA mode, data portability export |
+| 21 | Privacy, Security & Governance | **Partial** | Credential encryption (`secrets.py`), confirmation gates, high-risk approval flow, killswitch/circuit breaker, resource throttling, audit journal, least-privilege action scoping | Hardware mic mute integration, anti-spoof/replay detection, prompt injection defense, data retention policy UI, formal audit logs (beyond journal) |
+| 22 | Reliability, Quality & Operations | **Partial** | Structured rotating logs, 100+ automated tests, auto-repair & replan (up to 2× each), resource gate (CPU/memory), confidence-based fallback | Hallucination detection/mitigation, adversarial input testing, full localization/i18n |
+| 23 | Deployment, Architecture & Hardware | **Partial** | Hybrid cloud+local architecture, multi-LLM orchestration, MCP integration bus, SQLite persistence, Flask dashboard | Containerization, autoscaling, formal SLA monitoring, disaster recovery |
+| 24 | Emerging & Future | N/A | Market/trading analysis subsystem (bonus domain not in original taxonomy — full multi-timeframe analysis, backtesting, paper trading, risk management) | Real-time speech-to-speech translation, emotional prosody recognition, spatial/embodied agents, multi-agent collaboration |
+
+### Summary
+
+| Status | Count | Domains |
+|--------|-------|---------|
+| Complete | 4 | Language Understanding, General Knowledge, Personal Productivity, Web & Digital Services, Developer Ecosystem |
+| Partial | 18 | Activation, Audio, Speech Output, Communications, Desktop/OS, Media, Creative/EDU, Health, Commerce, Travel, Enterprise, Multimodal, Proactive, Identity, Privacy, Reliability, Deployment, Emerging |
+| Missing | 1 | Smart Home & IoT |
+
+**Top priority gaps:** Smart Home/IoT (zero implementation), Health/Wellbeing (critical safety features absent), Media streaming (no Spotify/Apple Music/podcasts), Multi-user identity, Anti-spoof security.
+
+---
+
 ## 1. Activation & Conversational UX
 
 - **Wake-Word Activation (VA-UX-001)**: Standby listening for a trigger phrase (e.g. “Alexa”, “OK Google”). Edge-device ASR (keyword spotting) listens locally; after wake-word detection it records/transmits input. _Example:_ User says “Hey Assistant” to start interaction. _Depends on:_ local mic array, DSP. _Maturity:_ Production. _Autonomy/Risk:_ Low (only listens for keyphrase); needs user consent to listen. _Failure:_ False triggers or missed wake words. _Privacy:_ Local only (until triggered).
